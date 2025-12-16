@@ -1,0 +1,4 @@
+rdkit>=2024
+pandas
+numpy 
+joblib
