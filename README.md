@@ -108,7 +108,7 @@ $ git clone https://huggingface.co/datamol-io/safe-gpt/ models/safe_gpt/pretrain
 ## データセットの構築
 ### 最初のステップ
 ```bash
-$ conda activate t5chem
+$ conda activate t5chem_copy
 $ python src/curate_datasets.py
 ```
 
