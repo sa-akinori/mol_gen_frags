@@ -136,6 +136,7 @@ $ t5chem train --data_dir data/rffmg/rc_cms/normal --output_dir models/t5chem/tr
 # 本研究のfrom_scratchモデルは--pretrain ''とした場合の結果です。
 
 # 2. safe-gptのファインチューニング
+$ conda activate safe_copy
 $ bash src/train_model/run_safe.sh
 # 引数が非常に多いため.shファイルに記載済み
 # .shファイル中のrc_cmsの部分、output_dirは適切に変更してください。また、--pretrain '' とすると事前学習済みモデルなしの学習が行われます。
