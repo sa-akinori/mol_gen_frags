@@ -1,4 +1,3 @@
-# Python 3.12環境用
 t5chem==1.2.0
 rdkit==2025.3.6
 transformers==4.45.2
