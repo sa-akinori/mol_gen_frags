@@ -154,6 +154,6 @@ $ bash src/gen_mols/gen_safe.sh
 
 ### 生成分子の評価
 ```bash
-$ conda activate t5chem_copy
+$ conda activate safe_copy
 $ python src/evaluation.py --model_name t5chem --model_ver trained --frag_method rc_cms --additional_path normal
 ```
