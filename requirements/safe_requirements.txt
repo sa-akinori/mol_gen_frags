@@ -2,3 +2,4 @@
 safe-mol==0.1.13
 rdkit==2025.3.6
 transformers==4.45.2
+xlsxwriter
