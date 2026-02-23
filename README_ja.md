@@ -12,15 +12,15 @@ cd mol_gen_frags
 ## 2つの仮想環境が必要
 ### T5Chem
 ```bash
-conda create -n t5chem_copy python=3.12
-conda activate t5chem_copy
+conda create -n t5chem python=3.12
+conda activate t5chem
 pip install -r requirements/t5chem_requirements.txt
 pip install -e .
 ```
 ### SAFE
 ```bash
-conda create -n safe_copy python=3.12
-conda activate safe_copy
+conda create -n safe python=3.12
+conda activate safe
 pip install -r requirements/safe_requirements.txt
 pip install -e .
 ```
@@ -113,35 +113,35 @@ $ git clone https://huggingface.co/datamol-io/safe-gpt/ models/safe_gpt/pretrain
 ## データセットの構築
 ### 最初のステップ
 ```bash
-$ conda activate t5chem_copy
+$ conda activate t5chem
 $ python src/curate_datasets.py
 ```
 
 ### データセットの作成
 ```bash
 # 1. rffmgフラグメントの作成
-$ conda activate t5chem_copy
+$ conda activate t5chem
 $ python src/gen_frags/rffmg_frags.py --frag_method brics # chose brics or rc_cms
 
 # 2. safeフラグメントの作成
-$ conda activate safe_copy
+$ conda activate safe
 $ python src/gen_frags/safe_frags.py --frag_method brics # chose brics or rc_cms
 
 # 3. train, test, validationデータセットの作成
-$ conda activate safe_copy
+$ conda activate safe
 $ python src/make_datasets.py --frag_method brics # chose brics or rc_cms
 ```
 
 ### モデルの学習
 ```bash
 # 1. t5chemを用いたrffmgモデルの学習
-$ conda activate t5chem_copy
+$ conda activate t5chem
 $ t5chem train --data_dir data/rffmg/rc_cms/normal --output_dir models/t5chem/trained/rffmg/rc_cms --pretrain models/t5chem/pretrained --task_type product --num_epoch 50
 # rc_cmsの部分、output_dirは適切に変更してください。また、--pretrain '' とすると事前学習済みモデルなしの学習が行われます。
 # 本研究のfrom_scratchモデルは--pretrain ''とした場合の結果です。
 
 # 2. safe-gptのファインチューニング
-$ conda activate safe_copy
+$ conda activate safe
 $ bash src/train_model/run_safe.sh
 # 引数が非常に多いため.shファイルに記載済み
 # .shファイル中のrc_cmsの部分、output_dirは適切に変更してください。また、--pretrain '' とすると事前学習済みモデルなしの学習が行われます。
@@ -159,7 +159,7 @@ $ bash src/gen_mols/gen_safe.sh
 
 ### 生成分子の評価
 ```bash
-$ conda activate safe_copy
+$ conda activate safe
 $ python src/evaluation.py --model_name t5chem --model_ver trained --frag_method rc_cms --additional_path normal
 ```
 

@@ -15,15 +15,15 @@ It provides step-by-step instructions for extracting fragments from arbitrary SM
 ## Two Conda Environments Required
 ### T5Chem
 ```bash
-conda create -n t5chem_copy python=3.12
-conda activate t5chem_copy
+conda create -n t5chem python=3.12
+conda activate t5chem
 pip install -r requirements/t5chem_requirements.txt
 pip install -e .
 ```
 ### SAFE
 ```bash
-conda create -n safe_copy python=3.12
-conda activate safe_copy
+conda create -n safe python=3.12
+conda activate safe
 pip install -r requirements/safe_requirements.txt
 pip install -e .
 ```
@@ -116,35 +116,35 @@ Coming soon.
 ## Building Datasets
 ### First Step
 ```bash
-$ conda activate t5chem_copy
+$ conda activate t5chem
 $ python src/curate_datasets.py
 ```
 
 ### Creating Datasets
 ```bash
 # 1. Create RFFMG fragments
-$ conda activate t5chem_copy
+$ conda activate t5chem
 $ python src/gen_frags/rffmg_frags.py --frag_method brics # choose brics or rc_cms
 
 # 2. Create SAFE fragments
-$ conda activate safe_copy
+$ conda activate safe
 $ python src/gen_frags/safe_frags.py --frag_method brics # choose brics or rc_cms
 
 # 3. Create train, test, validation datasets
-$ conda activate safe_copy
+$ conda activate safe
 $ python src/make_datasets.py --frag_method brics # choose brics or rc_cms
 ```
 
 ### Model Training
 ```bash
 # 1. Train RFFMG model with T5Chem
-$ conda activate t5chem_copy
+$ conda activate t5chem
 $ t5chem train --data_dir data/rffmg/rc_cms/normal --output_dir models/t5chem/trained/rffmg/rc_cms --pretrain models/t5chem/pretrained --task_type product --num_epoch 50
 # Adjust the rc_cms part and output_dir as needed. Use --pretrain '' for training without a pre-trained model.
 # The from_scratch models in this study were trained with --pretrain ''.
 
 # 2. Fine-tune SAFE-GPT
-$ conda activate safe_copy
+$ conda activate safe
 $ bash src/train_model/run_safe.sh
 # Due to the large number of arguments, they are specified in the .sh file.
 # Adjust the rc_cms part and output_dir in the .sh file as needed. Use --pretrain '' for training without a pre-trained model.
@@ -162,7 +162,7 @@ $ bash src/gen_mols/gen_safe.sh
 
 ### Evaluation of Generated Molecules
 ```bash
-$ conda activate safe_copy
+$ conda activate safe
 $ python src/evaluation.py --model_name t5chem --model_ver trained --frag_method rc_cms --additional_path normal
 ```
 
