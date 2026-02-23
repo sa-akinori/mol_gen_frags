@@ -1,18 +1,15 @@
 # Representation for Flexible Fragment-Controlled Molecular Generation (RFFMG): A Framework for Versatile Substructure-Conditioned Molecular Design
-
-[Japanese version (日本語版)](README_ja.md)
-
 ```bash
 git clone https://github.com/sa-akinori/mol_gen_frags.git
 cd mol_gen_frags
 ```
 
-## Tutorial
+## チュートリアル
 
-A tutorial for molecular generation is available in [`tutorial.ipynb`](tutorial.ipynb).
-It provides step-by-step instructions for extracting fragments from arbitrary SMILES and generating new molecules using pre-trained models.
+分子生成のチュートリアルは [`tutorial.ipynb`](tutorial.ipynb) に用意されています。
+学習済みモデルを用いて、任意のSMILESからフラグメントを抽出し、新しい分子を生成する手順をステップごとに解説しています。
 
-## Two Conda Environments Required
+## 2つの仮想環境が必要
 ### T5Chem
 ```bash
 conda create -n t5chem_copy python=3.12
@@ -28,15 +25,15 @@ pip install -r requirements/safe_requirements.txt
 pip install -e .
 ```
 
-## Modifications to Virtual Environments
+## 仮想環境の変更点
 ## T5Chem
-### Speed up training (t5chem/run_trainer.py)
+### 学習速度向上のための変更(t5chem/run_trainer.py)
 ```python
 # compute_metrics = AccuracyMetrics
 compute_metrics = None
 ```
 
-### Clarify model save paths (t5chem/run_trainer.py)
+### モデルの保存をわかりやすくするための変更(t5chem/run_trainer.py)
 ```python
 # tokenizer.save_vocabulary(args.output_dir)
 # trainer.save_model(args.output_dir)
@@ -45,14 +42,14 @@ tokenizer.save_vocabulary(f'{args.output_dir}/best_model/')
 trainer.save_model(f'{args.output_dir}/best_model/')
 ```
 
-### Disable wandb logging (t5chem/run_trainer.py)
+### wandbを使わない場合の変更(t5chem/run_trainer.py)
 ```python
 # report_to="wandb",  # enable logging to W&B
 report_to='none',
 ```
 
 ## SAFE
-### Clarify model save paths (safe/trainer/cli.py)
+### モデルの保存をわかりやすくするための変更(safe/trainer/cli.py)
 ```python
 # trainer.save_model()
 trainer.save_model(os.path.join(training_args.output_dir, "best_model"))
@@ -60,7 +57,7 @@ trainer.save_model(os.path.join(training_args.output_dir, "best_model"))
 # tokenizer.save(os.path.join(training_args.output_dir, "tokenizer.json"))
 tokenizer.save(os.path.join(training_args.output_dir, "best_model/tokenizer.json"))
 ```
-### Add early stopping for faster training (safe/trainer/cli.py)
+### 学習高速化のための追加(safe/trainer/cli.py)
 ```python
 trainer = SAFETrainer(
     model=model,
@@ -77,19 +74,19 @@ trainer = SAFETrainer(
     callbacks=[EarlyStoppingCallback(early_stopping_patience=15)] #add
 )
 ```
-### Fix errors caused by transformers version (safe/trainer/trainer_utils.py & safe/tokenizer.py)
+### transformersのバージョンによってエラーが出るので修正してください。(safe/trainer/trainer_utils.py & safe/tokenizer.py)
 ```python
-# Error in safe/trainer/trainer_utils.py (line 19)
+# safe/trainer/trainer_utils.py(19行目)におけるエラー
 # def compute_loss(self, model, inputs, return_outputs=False):
 def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
 
-# Error in safe/tokenizer.py (line 290)
+# safe/tokenizer.py(290行目)におけるエラー
 # self.tokenizer.save_pretrained(*args, **kwargs)
 self.tokenizer.save(*args, **kwargs)
 ```
 
-## Preparing Pre-trained/Trained Models and Datasets
-### Download trained models from Hugging Face
+## Pre-trained/trainedモデル・データセットの準備
+### 本研究の学習済みモデルをHugging Faceからmodelsフォルダーをダウンロード
 ```bash
 $ python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='sato-akinori/FFMG', allow_patterns='models/*', local_dir='.')"
 $ shopt -s globstar; for zip in models/**/*.zip; do unzip -o "$zip" -d "$(dirname "$zip")"; done
@@ -97,7 +94,7 @@ $ find models -name "*.zip" -exec sh -c 'unzip -o "$1" -d "$(dirname "$1")" && r
 ```
 
 ### T5Chem
-Download and extract the pre-trained model.
+事前学習モデルをダウンロードして解凍する。
 ```bash
 $ mkdir -p models/t5chem/pretrained
 $ wget -P models/t5chem/pretrained https://zenodo.org/records/14280768/files/simple_pretrain.tar.bz2
@@ -110,57 +107,57 @@ $ mkdir -p models/safe_gpt/pretrained
 $ git clone https://huggingface.co/datamol-io/safe-gpt/ models/safe_gpt/pretrained/
 ```
 
-### Curated Dataset
-Coming soon.
+### curated datasetの準備
+準備中
 
-## Building Datasets
-### First Step
+## データセットの構築
+### 最初のステップ
 ```bash
 $ conda activate t5chem_copy
 $ python src/curate_datasets.py
 ```
 
-### Creating Datasets
+### データセットの作成
 ```bash
-# 1. Create RFFMG fragments
+# 1. rffmgフラグメントの作成
 $ conda activate t5chem_copy
-$ python src/gen_frags/rffmg_frags.py --frag_method brics # choose brics or rc_cms
+$ python src/gen_frags/rffmg_frags.py --frag_method brics # chose brics or rc_cms
 
-# 2. Create SAFE fragments
+# 2. safeフラグメントの作成
 $ conda activate safe_copy
-$ python src/gen_frags/safe_frags.py --frag_method brics # choose brics or rc_cms
+$ python src/gen_frags/safe_frags.py --frag_method brics # chose brics or rc_cms
 
-# 3. Create train, test, validation datasets
+# 3. train, test, validationデータセットの作成
 $ conda activate safe_copy
-$ python src/make_datasets.py --frag_method brics # choose brics or rc_cms
+$ python src/make_datasets.py --frag_method brics # chose brics or rc_cms
 ```
 
-### Model Training
+### モデルの学習
 ```bash
-# 1. Train RFFMG model with T5Chem
+# 1. t5chemを用いたrffmgモデルの学習
 $ conda activate t5chem_copy
 $ t5chem train --data_dir data/rffmg/rc_cms/normal --output_dir models/t5chem/trained/rffmg/rc_cms --pretrain models/t5chem/pretrained --task_type product --num_epoch 50
-# Adjust the rc_cms part and output_dir as needed. Use --pretrain '' for training without a pre-trained model.
-# The from_scratch models in this study were trained with --pretrain ''.
+# rc_cmsの部分、output_dirは適切に変更してください。また、--pretrain '' とすると事前学習済みモデルなしの学習が行われます。
+# 本研究のfrom_scratchモデルは--pretrain ''とした場合の結果です。
 
-# 2. Fine-tune SAFE-GPT
+# 2. safe-gptのファインチューニング
 $ conda activate safe_copy
 $ bash src/train_model/run_safe.sh
-# Due to the large number of arguments, they are specified in the .sh file.
-# Adjust the rc_cms part and output_dir in the .sh file as needed. Use --pretrain '' for training without a pre-trained model.
-# The from_scratch models in this study were trained with --pretrain ''.
+# 引数が非常に多いため.shファイルに記載済み
+# .shファイル中のrc_cmsの部分、output_dirは適切に変更してください。また、--pretrain '' とすると事前学習済みモデルなしの学習が行われます。
+# 本研究のfrom_scratchモデルは--pretrain ''とした場合の結果です。
 ```
 
-### Molecular Generation
+### 分子の生成
 ```bash
-# Generate molecules with T5Chem model
+# t5chemモデルを用いた分子生成
 $ bash src/gen_mols/gen_t5chem.sh
 
-# Generate molecules with SAFE-GPT model
+# safe-gptモデルを用いた分子生成
 $ bash src/gen_mols/gen_safe.sh
 ```
 
-### Evaluation of Generated Molecules
+### 生成分子の評価
 ```bash
 $ conda activate safe_copy
 $ python src/evaluation.py --model_name t5chem --model_ver trained --frag_method rc_cms --additional_path normal
