@@ -157,3 +157,5 @@ $ bash src/gen_mols/gen_safe.sh
 $ conda activate safe_copy
 $ python src/evaluation.py --model_name t5chem --model_ver trained --frag_method rc_cms --additional_path normal
 ```
+
+If you need the curated ChEMBL dataset used in this study, please feel free to contact us at [sato.akinori@naist.ac.jp] or [miyao@dsc.naist.jp].
