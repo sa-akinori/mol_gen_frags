@@ -3,7 +3,7 @@ export CUDA_VISIBLE_DEVICES=0
 
 # conda setup
 source ~/miniconda3/etc/profile.d/conda.sh
-conda activate safe_copy
+conda activate safe
 
 FRAG_NAME="rc_cms" # "brics" or "rc_cms"
 
