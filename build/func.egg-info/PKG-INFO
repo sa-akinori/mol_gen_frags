@@ -1,0 +1,9 @@
+Metadata-Version: 2.4
+Name: func
+Version: 0.1.0
+Summary: Utilities for fragment-based molecule generation
+Author: A. Sato
+License-File: LICENSE
+Dynamic: author
+Dynamic: license-file
+Dynamic: summary

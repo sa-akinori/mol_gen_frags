@@ -24,24 +24,6 @@ safe_logger.add(sys.stderr, level="CRITICAL")
 def timeout_handler(signum, frame):
     raise TimeoutError("Execution time exceeded the limit")
     
-def safe_to_smiles(
-    safe_string: str
-    ) -> str:
-    """
-    Convert SAFE representation to SMILES string.
-    
-    Args:
-        safe_string: SAFE representation of a molecule
-        
-    Returns:
-        SMILES string or 'invalid' if conversion fails
-    """
-    try:
-        smiles = safe.decode(safe_string, canonical=True)
-        return smiles
-    except:
-        return 'safe_invalid'
-    
 def main():
     
     parser = argparse.ArgumentParser(description='Generate molecules using SAFE model')

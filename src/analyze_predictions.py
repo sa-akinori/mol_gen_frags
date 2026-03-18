@@ -214,8 +214,8 @@ if __name__ == "__main__":
         
         # Calculate fragment statistics for all data
         curated_df['mean_SAscores'] = curated_df['SAscores'].apply(lambda x: sum(ast.literal_eval(x))/len(ast.literal_eval(x)) if len(ast.literal_eval(x)) else 0)
-        curated_df['n_fragments'] = curated_df['fragment'].apply(lambda x: len(x.split('.')))
-        curated_df['n_wildcards'] = curated_df['fragment'].apply(lambda x: x.count('*'))
+        curated_df['n_fragments']   = curated_df['fragment'].apply(lambda x: len(x.split('.')))
+        curated_df['n_wildcards']   = curated_df['fragment'].apply(lambda x: x.count('*'))
         curated_df['fragment_size'] = curated_df['fragment'].apply(lambda x: len(x.replace('.', '').replace('*', '')))
         
         for y_axis in ['validratio', 'uniqueratio', 'validfragratio', 'novelratio', 'mean_SAscores', 'tanimoto_sim']:
@@ -273,7 +273,7 @@ if __name__ == "__main__":
         no_spec_stats_df.to_csv(f'{BASEPATH}/results/{arc_name}/{model_name}/{str_name}/{slice_method}/{gen_method}/normal/no_spec_stats.csv')
         
     if 1:
-        const_name = 'sim_tr_dup_frags' # ['attach_point_num', 'dup_frags', 'frag_num', 'new_attach_point_num', 'new_dup_frags', 'new_frag_num', 'sim_tr_attach_point_num', 'sim_tr_dup_frags', 'sim_tr_frag_num']
+        const_name = 'dup_frags' # ['attach_point_num', 'dup_frags', 'frag_num']
         
         # Verification of why the generation accuracy is poor with respect to the number of fragments (Is the input fragment larger than the training data because it is randomly selected from unique fragments?)
         train_df   = pd.read_csv(f'{BASEPATH}/data/{str_name}/{slice_method}/normal/train.source', sep='\t', header=None, names=['smiles'])

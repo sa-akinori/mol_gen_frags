@@ -397,13 +397,31 @@ def calculate_heavy_atom_growth(
     
     return diff_heavy_atoms
 
+def calculateRank(target_can, valid_smis):
+    """
+    Find the rank of the target molecule among valid canonical SMILES.
+
+    Args:
+        target_can: Target molecule canonical SMILES
+        valid_smis: List of canonical SMILES strings
+
+    Returns:
+        int: Rank of first occurrence (1-indexed), or 0 if not found
+    """
+    if target_can is None:
+        return 0
+    for i, smi in enumerate(valid_smis):
+        if smi == target_can:
+            return i + 1
+    return 0
+
 def evaluation_func(genmoldf, catsmiCol, trsmiles, nmaxgen, algorithm_name):
-    
+
     # Create valid smiles
     genmoldf['valid_smis']   = genmoldf[catsmiCol].apply(lambda x: [Smi2CanSmi(s) for s in x if Smi2Mol(s) is not None])
     genmoldf['nvalid']       = genmoldf['valid_smis'].apply(len)
     genmoldf['validratio']   = genmoldf['nvalid']/nmaxgen
-    
+
     # Create unique smiles
     genmoldf['unique_smis']  = genmoldf['valid_smis'].apply(lambda x:list(set(x)))
     genmoldf['nunique']      = genmoldf['unique_smis'].apply(len)
@@ -459,13 +477,6 @@ def sc3_check_genmol_results(
     
     os.makedirs(outfd, exist_ok=True)
     
-    # Calculate top-k accuracy
-    if 'rank' in genmols.columns:
-        topKacc = calculateTopKAccuracy(ranks=list(genmols['rank']), k_values=[1, 3, 5, 10, 30, 50])
-        topKacc_df = pd.DataFrame.from_dict(topKacc, orient='index').T
-        topKacc_df.to_csv(f'{outfd}/top_K_acc.tsv', sep='\t')
-    
-    
     # random selection for making visualization table 
     if not skipCreateExcel:
         cols        = ['fragment', 'target'] + [f'prediction_{i}' for i in np.sort(rng.choice(np.arange(1,nmaxgen+1),nanalogsForVis, replace=False))]
@@ -495,6 +506,12 @@ def sc3_check_genmol_results(
     # Combine processed chunks back into single dataframe
     genmols = pd.concat(genmoldf_chunks, ignore_index=True)
     
+    # Calculate top-k accuracy
+    if 'rank' in genmols.columns:
+        topKacc = calculateTopKAccuracy(ranks=list(genmols['rank']), k_values=[1, 3, 5, 10, 30, 50])
+        topKacc_df = pd.DataFrame.from_dict(topKacc, orient='index').T
+        topKacc_df.to_csv(f'{outfd}/top_K_acc.tsv', sep='\t')
+
     stats = dict()
     stats['avg_validity']         = genmols['validratio'].mean() 
     stats['std_validity']         = genmols['validratio'].std() 
