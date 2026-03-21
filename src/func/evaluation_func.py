@@ -16,6 +16,7 @@ from scipy.stats import entropy
 from scipy.spatial.distance import jensenshannon
 from collections import Counter, defaultdict
 import itertools
+from glob import glob
 from typing import Set, Dict
 
 def loadTrainSmiles(
@@ -99,24 +100,23 @@ def calculateTopKAccuracy(
     k_values:List[int]=[1, 3, 5, 10, 30, 50]
     )->Dict[str, float]:
     """
-    Calculate top-k accuracy from rank values.
-    
+    Calculate top-k accuracy (mean and std) from rank values.
+
     Args:
         ranks (List[int]): List of rank values (0 means target not found, 1-50 means position)
         k_values (List[int]): List of k values to calculate accuracy for
-        
+
     Returns:
-        dict: Dictionary with top-k accuracy values
+        dict: Dictionary with top-k avg and std values
     """
-    total_samples = len(ranks)
+    ranks = np.array(ranks)
     accuracies = {}
-    
+
     for k in k_values:
-        # Count samples where rank is between 1 and k (inclusive)
-        hits = sum(1 for rank in ranks if 1 <= rank <= k)
-        accuracy = hits / total_samples if total_samples > 0 else 0.0
-        accuracies[f'top_{k}'] = accuracy
-    
+        hits = ((ranks >= 1) & (ranks <= k)).astype(int)
+        accuracies[f'top_{k}_avg'] = hits.mean()
+        accuracies[f'top_{k}_std'] = hits.std()
+
     return accuracies
     
 def getSmiContainAllFrags(
@@ -422,6 +422,11 @@ def evaluation_func(genmoldf, catsmiCol, trsmiles, nmaxgen, algorithm_name):
     genmoldf['nvalid']       = genmoldf['valid_smis'].apply(len)
     genmoldf['validratio']   = genmoldf['nvalid']/nmaxgen
 
+    # Calculate rank (rediscovery)
+    if 'target' in genmoldf.columns and 'rank' not in genmoldf.columns:
+        genmoldf['rank'] = genmoldf.apply(
+            lambda row: calculateRank(Smi2CanSmi(row['target']), row['valid_smis']), axis=1)
+
     # Create unique smiles
     genmoldf['unique_smis']  = genmoldf['valid_smis'].apply(lambda x:list(set(x)))
     genmoldf['nunique']      = genmoldf['unique_smis'].apply(len)
@@ -494,24 +499,35 @@ def sc3_check_genmol_results(
     genmols[catsmiCol] = genmols[predcols].apply(lambda x: (' '.join(x)).strip().split(), axis=1)
     genmols.drop(columns=predcols, inplace=True)
     
-    # Split dataframe into chunks for parallel processing
-    chunk_size = len(genmols) // n_chunks if len(genmols) >= n_chunks else 1
-    genmoldfs = [genmols[i:i+chunk_size] for i in range(0, len(genmols), chunk_size)]
-    
-    # Process chunks in parallel
-    genmoldf_chunks = Parallel(n_jobs=n_chunks)(
-        delayed(evaluation_func)(genmoldf, catsmiCol, trsmiles, nmaxgen, algorithm_name) 
-        for genmoldf in tqdm(genmoldfs, desc='Processing chunks'))
-    
-    # Combine processed chunks back into single dataframe
-    genmols = pd.concat(genmoldf_chunks, ignore_index=True)
+    # Split dataframe into chunks, process sequentially, and save each to disk to reduce memory usage
+    chunk_size = len(genmols) // n_chunks if len(genmols) >= n_chunks else len(genmols)
+    genmoldfs = [genmols.iloc[i:i+chunk_size] for i in range(0, len(genmols), chunk_size)]
+    del genmols
+
+    chunk_dir = f'{outfd}/chunks'
+    os.makedirs(chunk_dir, exist_ok=True)
+
+    for chunk_id, genmoldf in enumerate(tqdm(genmoldfs, desc='Processing chunks')):
+        sub_chunk_size = os.cpu_count()-1
+        sub_chunks = [genmoldf.iloc[j:j+sub_chunk_size] for j in range(0, len(genmoldf), sub_chunk_size)]
+        sub_results = Parallel(n_jobs=sub_chunk_size)(
+            delayed(evaluation_func)(sub, catsmiCol, trsmiles, nmaxgen, algorithm_name)
+            for sub in sub_chunks)
+        result = pd.concat(sub_results, ignore_index=True)
+        result.to_csv(f'{chunk_dir}/chunk_{chunk_id}.tsv', sep='\t')
+        del result
+    del genmoldfs
+
+    # Load all chunks from disk and combine
+    chunk_files = sorted(glob(f'{chunk_dir}/chunk_*.tsv'), key=lambda x: int(x.split('_')[-1].split('.')[0]))
+    genmols = pd.concat([pd.read_csv(f, sep='\t', index_col=0) for f in chunk_files], ignore_index=True)
     
     # Calculate top-k accuracy
     if 'rank' in genmols.columns:
         topKacc = calculateTopKAccuracy(ranks=list(genmols['rank']), k_values=[1, 3, 5, 10, 30, 50])
         topKacc_df = pd.DataFrame.from_dict(topKacc, orient='index').T
         topKacc_df.to_csv(f'{outfd}/top_K_acc.tsv', sep='\t')
-
+        
     stats = dict()
     stats['avg_validity']         = genmols['validratio'].mean() 
     stats['std_validity']         = genmols['validratio'].std() 

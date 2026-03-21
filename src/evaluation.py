@@ -57,7 +57,7 @@ if __name__ =='__main__':
     
     # Evaluation gen mols
     genmols = loadGenSmiles(model_name, file_name, testInputfile)
-    stats, genmols = sc3_check_genmol_results(outfd=outfd, genmols=genmols, trsmiles=trsmiles, skipCreateExcel=False, algorithm_name=frag_method, n_chunks=os.cpu_count()-1)
+    stats, genmols = sc3_check_genmol_results(outfd=outfd, genmols=genmols, trsmiles=trsmiles, skipCreateExcel=False, algorithm_name=frag_method, n_chunks=5)
     stats.to_csv(f'{outfd}/stats.csv')
     
     # Calculate some basic physic property for training smiles
