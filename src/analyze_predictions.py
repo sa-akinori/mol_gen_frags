@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 import ast
 from func.figure_func import *
+from func.utility import *
 import seaborn as sns
 
 def extract_minmax_properties(predictions_path, properties_path, output_dir):
@@ -189,7 +190,7 @@ def spec_cond_frags(
         
 if __name__ == "__main__":
     # Settings
-    arc_name = 't5chem'
+    arc_name = 'safe_gpt'
     str_name = 'safe' if arc_name=='safe_gpt' else 'rffmg' # safe, rffmg
     model_name   = 'trained' # pretrained, trained
     slice_method = 'brics' # brics, rc_cms
@@ -228,7 +229,7 @@ if __name__ == "__main__":
             plot_fragment_validity(df=curated_df, x_axis='n_wildcards', y_axis=y_axis, save_path=f'{BASEPATH}/figures/frag_feat_vs_prop/{arc_name}/{model_name}/{str_name}/{slice_method}/{gen_method}/n_wildcards/{y_axis}.png')
             plot_fragment_validity(df=curated_df, x_axis='fragment_size', y_axis=y_axis, save_path=f'{BASEPATH}/figures/frag_feat_vs_prop/{arc_name}/{model_name}/{str_name}/{slice_method}/{gen_method}/fragment_size/{y_axis}.png')
             
-    if 0:
+    if 1:
         # Difference in generation accuracy between cases that satisfy the condition and those that do not (Condition: Input is one fragment with multiple attachment points or two fragments with one attachment point each)
         curated_df = pd.read_csv(f'{BASEPATH}/results/{arc_name}/{model_name}/{str_name}/{slice_method}/{gen_method}/normal/curated_data.tsv', sep='\t', index_col=0)
         spec_cond_bool  = [spec_cond_frags(f) for f in curated_df['fragment']]
@@ -249,8 +250,8 @@ if __name__ == "__main__":
         # 
         spec_stats['avg_tanimoto_sim']     = spec_cond_df[spec_cond_df['nnovel'] != 0]['tanimoto_sim'].mean()
         spec_stats['std_tanimoto_sim']     = spec_cond_df[spec_cond_df['nnovel'] != 0]['tanimoto_sim'].std()
-        # no_spec_stats['avg_tanimoto_sim_onfrags'] = spec_cond_df[spec_cond_df['nvalid_onfrags'] != 0]['tanimoto_sim_onfrags'].mean()
-        # no_spec_stats['std_tanimoto_sim_onfrags'] = spec_cond_df[spec_cond_df['nvalid_onfrags'] != 0]['tanimoto_sim_onfrags'].std()
+        spec_stats['avg_rediscovery']      = spec_cond_df[spec_cond_df['nnovel'] != 0]['rank'].apply(lambda x: 0 if x == 0 else 1).mean()
+        spec_stats['std_rediscovery']      = spec_cond_df[spec_cond_df['nnovel'] != 0]['rank'].apply(lambda x: 0 if x == 0 else 1).std()
         spec_stats_df = pd.Series(spec_stats)
         spec_stats_df.to_csv(f'{BASEPATH}/results/{arc_name}/{model_name}/{str_name}/{slice_method}/{gen_method}/normal/spec_stats.csv')
         
@@ -267,12 +268,12 @@ if __name__ == "__main__":
         # 
         no_spec_stats['avg_tanimoto_sim']     = no_spec_cond_df[no_spec_cond_df['nnovel'] != 0]['tanimoto_sim'].mean()
         no_spec_stats['std_tanimoto_sim']     = no_spec_cond_df[no_spec_cond_df['nnovel'] != 0]['tanimoto_sim'].std()
-        # no_spec_stats['avg_tanimoto_sim_onfrags'] = spec_cond_df[spec_cond_df['nvalid_onfrags'] != 0]['tanimoto_sim_onfrags'].mean()
-        # no_spec_stats['std_tanimoto_sim_onfrags'] = spec_cond_df[spec_cond_df['nvalid_onfrags'] != 0]['tanimoto_sim_onfrags'].std()
+        no_spec_stats['avg_rediscovery']      = no_spec_cond_df[no_spec_cond_df['nnovel'] != 0]['rank'].apply(lambda x: 0 if x == 0 else 1).mean()
+        no_spec_stats['std_rediscovery']      = no_spec_cond_df[no_spec_cond_df['nnovel'] != 0]['rank'].apply(lambda x: 0 if x == 0 else 1).std()
         no_spec_stats_df = pd.Series(no_spec_stats)
         no_spec_stats_df.to_csv(f'{BASEPATH}/results/{arc_name}/{model_name}/{str_name}/{slice_method}/{gen_method}/normal/no_spec_stats.csv')
         
-    if 1:
+    if 0:
         const_name = 'dup_frags' # ['attach_point_num', 'dup_frags', 'frag_num']
         
         # Verification of why the generation accuracy is poor with respect to the number of fragments (Is the input fragment larger than the training data because it is randomly selected from unique fragments?)
