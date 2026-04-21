@@ -3,8 +3,8 @@
 [Japanese version (日本語版)](README_ja.md)
 
 ```bash
-git clone https://github.com/sa-akinori/mol_gen_frags.git
-cd mol_gen_frags
+git clone https://github.com/sa-akinori/rffmg_molecular_design.git
+cd rffmg_molecular_design
 ```
 
 ## Tutorial
