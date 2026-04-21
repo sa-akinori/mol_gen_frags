@@ -1,7 +1,7 @@
 # Representation for Flexible Fragment-Controlled Molecular Generation (RFFMG): A Framework for Versatile Substructure-Conditioned Molecular Design
 ```bash
-git clone https://github.com/sa-akinori/mol_gen_frags.git
-cd mol_gen_frags
+git clone https://github.com/sa-akinori/rffmg_molecular_design.git
+cd rffmg_molecular_design
 ```
 
 ## チュートリアル
