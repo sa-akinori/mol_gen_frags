@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Checklist Review: train_gpt (2026-07-09)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; color:#222; }
+  h1 { border-bottom: 2px solid #333; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+  .item, .step { margin: 1em 0; padding: 0.8em 1em; border: 1px solid #ddd; border-radius: 4px; border-left-width: 6px; }
+  .item[data-result="PASS"] { border-left-color: #2e7d32; }
+  .item[data-result="PARTIAL"] { border-left-color: #ef6c00; }
+  .item[data-result="FAIL"] { border-left-color: #c62828; }
+  .item[data-result="NA"] { border-left-color: #9e9e9e; }
+  .step { border-left-color: #1565c0; }
+  .badge { display:inline-block; padding:0.05em 0.5em; border-radius:3px; font-size:0.8em; color:#fff; }
+  .PASS{background:#2e7d32;} .PARTIAL{background:#ef6c00;} .FAIL{background:#c62828;} .NA{background:#9e9e9e;}
+  table { border-collapse: collapse; } th,td{ border:1px solid #ccc; padding:0.3em 0.8em; }
+  .key { background:#fff8e1; padding:0.1em 0.3em; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Checklist Review: train_gpt</h1>
+  <p class="meta">Checklist: <code>check_list.txt</code> | 対象: <code>src/train_model/train_gpt.py</code> | 実行日: 2026-07-09 | Status: pending-approval</p>
+</header>
+
+<section id="summary">
+  <h2>サマリー</h2>
+  <table>
+    <tr><th>結果</th><th>件数</th></tr>
+    <tr><td><span class="badge PASS">PASS</span></td><td>3 (C001, C003, C005)</td></tr>
+    <tr><td><span class="badge PARTIAL">PARTIAL</span></td><td>3 (C002, C004, C006)</td></tr>
+    <tr><td><span class="badge FAIL">FAIL</span></td><td>0</td></tr>
+    <tr><td><span class="badge NA">N/A</span></td><td>0</td></tr>
+  </table>
+  <p>確信度 LOW: 0 件（全判定は grep/コード確認済みで HIGH。未確定は「方針判断」）。</p>
+</section>
+
+<section id="items">
+  <h2>チェック項目の判定</h2>
+
+  <article class="item" data-item-id="C001" data-result="PASS" data-confidence="HIGH">
+    <h3>[C001] from_scratch と fine-tuning が適切に分かれ、fine-tuning 時に事前学習モデルが適切に呼ばれる</h3>
+    <p class="meta">結果: <span class="badge PASS">PASS</span> | 確信度: HIGH</p>
+    <p><strong>確認箇所:</strong> <code>train_gpt.py:98-101, 137, 143-149</code></p>
+    <p><strong>判定理由:</strong> finetuning=<code>GPT2LMHeadModel.from_pretrained(args.pretrain)</code>、from_scratch=<code>GPT2Config.from_pretrained(args.pretrain)</code>→<code>GPT2LMHeadModel(config)</code>。tokenizer は両モード共通で ZINC からロード。分岐は <code>choices</code> で厳密。</p>
+    <p><strong>備考:</strong> run_rffmg.sh は既定 <code>entropy/gpt2_zinc_87m</code>（Hub モデル）を初期値に使う設計（意図通り）。</p>
+  </article>
+
+  <article class="item" data-item-id="C002" data-result="PARTIAL" data-confidence="HIGH">
+    <h3>[C002] 学習率などのパラメータが safe-gpt と一致（max_length のみ異なってよい）</h3>
+    <p class="meta">結果: <span class="badge PARTIAL">PARTIAL</span> | 確信度: HIGH</p>
+    <p><strong>確認箇所:</strong> <code>train_gpt.py:106-121, 156-171</code> vs <code>run_safe.sh:40-51</code></p>
+    <p><strong>判定理由:</strong> 主要 HP は全一致（epochs=50, lr=1e-4, warmup=10000, train_batch=32, eval/save steps=5000, save_total_limit=5, load_best_model_at_end, eval/save_strategy=steps）。<strong>差分1点</strong>: <code>per_device_eval_batch_size=32</code> を明示（safe は未指定で既定 8）。評価スループットのみに影響し学習結果には無影響。</p>
+    <p><strong>実トレース確認（改変後 safe 現物）:</strong> safe の <code>--config</code> は <code>AutoConfig.from_pretrained</code> のモデル config で学習HP config ではない。<code>per_device_eval_batch_size</code> の代入も無し → 実効 <strong>8</strong> で確定（config 調整ではない）。</p>
+    <p><strong>備考:</strong> 厳密一致を求めるなら eval batch を未指定に。実運用は許容範囲、ユーザー判断。</p>
+  </article>
+
+  <article class="item" data-item-id="C003" data-result="PASS" data-confidence="HIGH">
+    <h3>[C003] "A&gt;&gt;B" のうち "A&gt;&gt;" を入力、"B" のみ出力し損失計算・学習</h3>
+    <p class="meta">結果: <span class="badge PASS">PASS</span> | 確信度: HIGH</p>
+    <p><strong>確認箇所:</strong> <code>train_gpt.py:53-58</code>（RFFMGDataset）</p>
+    <p><strong>判定理由:</strong> <code>input_ids=[bos]+prompt+target+[eos]</code>、<code>labels=[-100]*(1+len(prompt))+target+[eos]</code>。位置一致・オフバイワン無し。プロンプト（<code>&lt;bos&gt; source "&gt;&gt;"</code>）は -100 マスク、loss は target と eos のみ。</p>
+    <p><strong>備考（縁ケース）:</strong> <code>1+len(prompt) &gt;= max_length</code> の超過例は labels 全 -100（信号ゼロ・eos 欠落）になり得る。max_length=256 にデータ長が収まれば実害なし。</p>
+  </article>
+
+  <article class="item" data-item-id="C004" data-result="PARTIAL" data-confidence="HIGH">
+    <h3>[C004] 再現性が担保されている</h3>
+    <p class="meta">結果: <span class="badge PARTIAL">PARTIAL</span> | 確信度: HIGH</p>
+    <p><strong>確認箇所:</strong> <code>train_gpt.py:20, 134, 169</code> vs <code>src/func/utility.py:26-42</code></p>
+    <p><strong>判定理由:</strong> <code>transformers.set_seed</code> + <code>TrainingArguments(seed=...)</code> でシード固定・データシャッフル決定性は確保。ただしプロジェクト標準 <code>func.utility.set_seed</code>（cudnn.deterministic / use_deterministic_algorithms / CUBLAS_WORKSPACE_CONFIG / PYTHONHASHSEED）ではないため GPU ビット決定性は未保証。</p>
+    <p><strong>備考:</strong> 完全決定化を要求するか要確認（<code>use_deterministic_algorithms(True)</code> は例外/速度低下の可能性）。<strong>【ユーザー承認済み】</strong> → <code>func.utility.set_seed</code> 化を実施（Step 2 確定）。</p>
+  </article>
+
+  <article class="item" data-item-id="C005" data-result="PASS" data-confidence="HIGH">
+    <h3>[C005] 学習過程が wandb の適切なフォルダに保存（モデルも保存）</h3>
+    <p class="meta">結果: <span class="badge PASS">PASS</span> | 確信度: HIGH</p>
+    <p><strong>確認箇所:</strong> <code>train_gpt.py:131, 170, 182-184</code> vs <code>run_rffmg.sh:23-25</code></p>
+    <p><strong>判定理由:</strong> <code>report_to=["wandb"]</code>＋<code>WANDB_MODE</code> setdefault offline。run_rffmg.sh が <code>WANDB_DIR=wandb/rffmg/${MODEL_NAME}/${MODE}/${FRAG_NAME}</code> を export。モデルは <code>trainer.save_model(best_model)</code>+<code>tokenizer.save_pretrained</code> で保存、途中 checkpoint も save_steps で保存。</p>
+    <p><strong>備考（要確認）:</strong> run_rffmg.sh を経由せず直接実行すると WANDB_DIR 未設定で <code>./wandb</code> に書かれる（分離されない）。想定運用では問題なし。</p>
+  </article>
+
+  <article class="item" data-item-id="C006" data-result="PARTIAL" data-confidence="HIGH">
+    <h3>[C006] early_stopping の設定が入っている（詳細は safe-gpt や t5chem と同じ） <span class="key">← 最重要</span></h3>
+    <p class="meta">結果: <span class="badge PARTIAL">PARTIAL</span> | 確信度: HIGH</p>
+    <p><strong>確認箇所:</strong> <code>train_gpt.py:173-180</code> / safe <code>trainer/cli.py:340</code> / t5chem <code>run_trainer.py:280</code></p>
+    <p><strong>判定理由（grep 事実）:</strong></p>
+    <ul>
+      <li><strong>train_gpt.py</strong>: <code>Trainer(...)</code> に callbacks 無し → EarlyStoppingCallback <strong>無し</strong>（load_best_model_at_end のみ）。</li>
+      <li><strong>safe-gpt（最も近い基準）</strong>: <code>SAFETrainer</code> に callbacks 無し、trainer 配下に early stopping 実装 <strong>無し</strong>。</li>
+      <li><strong>t5chem</strong>: <code>callbacks=[EarlyStoppingCallback(early_stopping_patience=15)] if do_eval else []</code>、<code>metric_for_best_model="eval_loss"</code> 明示 → <strong>有り</strong>。</li>
+    </ul>
+    <p>→ train_gpt.py の「early stopping 無し」は <strong>safe-gpt と一致・t5chem と不一致</strong>。基準が割れている。</p>
+    <p><strong>改変後 safe 現物での再確認:</strong> ユーザー改変済み <code>safe/</code> パッケージ全体を再 grep → early stopping は <strong>どこにも無し</strong>（後付けも無し）を確定。</p>
+    <p><strong>備考（最重要・要確認）:</strong> 「safe-gpt 準拠で不要」か「t5chem 準拠で patience=15 導入」か方針判断。導入時は <code>EarlyStoppingCallback</code> ＋ <code>metric_for_best_model="eval_loss"</code> が必要。</p>
+  </article>
+</section>
+
+<section id="plan">
+  <h2>修正計画</h2>
+  <p>計画対象は PARTIAL の C002/C004/C006。多くが方針判断を伴うため承認前提。全 Step の対象は <code>src/train_model/train_gpt.py</code>。</p>
+
+  <article class="step" data-step="1" data-related-items="C006">
+    <h3>Step 1: early stopping 方針の確定と Callback 追加（採用時）</h3>
+    <p><strong>対象ファイル:</strong> <code>src/train_model/train_gpt.py</code></p>
+    <p><strong>変更内容:</strong> t5chem 準拠なら (a) <code>EarlyStoppingCallback</code> import、(b) <code>Trainer(..., callbacks=[EarlyStoppingCallback(early_stopping_patience=15)])</code>、(c) <code>TrainingArguments(..., metric_for_best_model="eval_loss")</code> 明示。safe-gpt 準拠なら現状維持で解消扱い。</p>
+    <p><strong>依存関係:</strong> なし（方針決定が前提）</p>
+    <p><strong>対応項目:</strong> C006</p>
+  </article>
+
+  <article class="step" data-step="2" data-related-items="C004">
+    <h3>Step 2: 再現性の強化（プロジェクト標準 set_seed）</h3>
+    <p><strong>対象ファイル:</strong> <code>src/train_model/train_gpt.py</code></p>
+    <p><strong>変更内容:</strong> <code>transformers.set_seed</code> を <code>func.utility.set_seed(args.seed)</code> に置換（import パス調整）。<code>TrainingArguments(seed=...)</code> は維持。完全決定化の可否を要確認。</p>
+    <p><strong>依存関係:</strong> なし</p>
+    <p><strong>対応項目:</strong> C004</p>
+  </article>
+
+  <article class="step" data-step="3" data-related-items="C002">
+    <h3>Step 3: eval batch size の safe-gpt 整合（任意）</h3>
+    <p><strong>対象ファイル:</strong> <code>src/train_model/train_gpt.py</code></p>
+    <p><strong>変更内容:</strong> 厳密一致を満たすなら <code>per_device_eval_batch_size</code> 明示を外し safe 既定(8)に。学習結果に無影響のため現状維持でも可。</p>
+    <p><strong>依存関係:</strong> なし</p>
+    <p><strong>対応項目:</strong> C002</p>
+  </article>
+
+  <article class="step" data-step="4" data-related-items="C003">
+    <h3>Step 4: truncation 縁ケースのロバスト化（任意）</h3>
+    <p><strong>対象ファイル:</strong> <code>src/train_model/train_gpt.py</code>（RFFMGDataset）</p>
+    <p><strong>変更内容:</strong> <code>1+len(prompt) &gt;= max_length</code> の超過例をフィルタ（スキップ+ログ）または target 優先切り詰め。データ長が 256 内なら不要。</p>
+    <p><strong>依存関係:</strong> なし</p>
+    <p><strong>対応項目:</strong> C003（PASS だが任意補強）</p>
+  </article>
+</section>
+
+<section id="next-actions">
+  <h2>次のアクション</h2>
+  <h3>🔧 修正計画の承認待ち</h3>
+  <p>計画を確認し「OK／進めて」で承認すると implementer に委譲して実装します。承認までコードは変更しません。</p>
+  <h3>👀 ユーザー確認推奨（方針判断）</h3>
+  <ul>
+    <li><span class="key">[C006] early stopping</span>: safe-gpt 準拠（無し）か t5chem 準拠（patience=15）か ← 最重要</li>
+    <li>[C004] 再現性: <code>func.utility.set_seed</code> に切替え完全決定化するか（速度/例外リスク）</li>
+    <li>[C002] eval batch を safe 既定(8)に厳密一致させるか（学習結果に無影響）</li>
+    <li>[C003] truncation 縁ケースを補強するか（データ長 256 内なら不要）</li>
+  </ul>
+</section>
+</body>
+</html>

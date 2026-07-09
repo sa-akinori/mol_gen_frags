@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Checklist Review: gen_safe (2026-07-09)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; color:#222; }
+  h1 { border-bottom: 2px solid #333; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+  .item, .step { margin: 1em 0; padding: 0.8em 1em; border: 1px solid #ddd; border-radius: 4px; border-left-width: 6px; }
+  .item[data-result="PASS"] { border-left-color: #2e7d32; }
+  .item[data-result="PARTIAL"] { border-left-color: #ef6c00; }
+  .item[data-result="FAIL"] { border-left-color: #c62828; }
+  .item[data-result="NA"] { border-left-color: #9e9e9e; }
+  .step { border-left-color: #1565c0; }
+  .badge { display:inline-block; padding:0.05em 0.5em; border-radius:3px; font-size:0.8em; color:#fff; }
+  .PASS{background:#2e7d32;} .PARTIAL{background:#ef6c00;} .FAIL{background:#c62828;} .NA{background:#9e9e9e;}
+  .low { color:#c62828; font-weight:bold; }
+  table { border-collapse: collapse; } th,td{ border:1px solid #ccc; padding:0.3em 0.8em; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Checklist Review: gen_safe</h1>
+  <p class="meta">Checklist: <code>check_list.txt</code> | 対象: <code>src/gen_safe.py</code>（SAFE-GPT direct 生成） | 実行日: 2026-07-09 | Status: pending-approval</p>
+</header>
+
+<section id="summary">
+  <h2>サマリー</h2>
+  <table>
+    <tr><th>結果</th><th>件数</th></tr>
+    <tr><td><span class="badge PASS">PASS</span></td><td>2 (C001, C002)</td></tr>
+    <tr><td><span class="badge PARTIAL">PARTIAL</span></td><td>0</td></tr>
+    <tr><td><span class="badge FAIL">FAIL</span></td><td>1 (C003)</td></tr>
+    <tr><td><span class="badge NA">N/A</span></td><td>0</td></tr>
+  </table>
+  <p>確信度 LOW: C003 内の機序 C・E（修正計画 Step 2 が該当）。</p>
+</section>
+
+<section id="items">
+  <h2>チェック項目の判定</h2>
+
+  <article class="item" data-item-id="C001" data-result="PASS" data-confidence="HIGH">
+    <h3>[C001] 学習済みモデルを読み込んで生成ができている</h3>
+    <p class="meta">結果: <span class="badge PASS">PASS</span> | 確信度: HIGH</p>
+    <p><strong>確認した箇所:</strong> <code>src/gen_safe.py:100-105, 121-123, 139-146</code></p>
+    <p><strong>判定理由:</strong> <code>SAFEDoubleHeadsModel.from_pretrained</code> + <code>SAFETokenizer.from_pretrained(...).get_pretrained()</code> で読み込み、device 転送・<code>eval()</code>・test ループ→<code>model.generate</code>→<code>safe.decode</code>+RDKit→DataFrame→<code>predictions.csv</code>/<code>error_logs.csv</code> まで機構が一貫。ロード＋生成経路は実際に動く。</p>
+    <p><strong>該当記述:</strong> <code>model = SAFEDoubleHeadsModel.from_pretrained(model_path)</code> / <code>outputs = model.generate(**model_inputs, ...)</code></p>
+    <p><strong>備考:</strong> 「機構の成立」は「生成品質」（=C003）と別。ロード対象 <code>models/safe/gpt/finetuning/brics/best_model</code> は現状ローカル未作成（run_safe.sh の学習成果物）。</p>
+  </article>
+
+  <article class="item" data-item-id="C002" data-result="PASS" data-confidence="MEDIUM">
+    <h3>[C002] 分子生成コードに再現性がある</h3>
+    <p class="meta">結果: <span class="badge PASS">PASS</span> | 確信度: MEDIUM</p>
+    <p><strong>確認した箇所:</strong> <code>src/gen_safe.py:118, 55</code>, <code>src/func/utility.py:26-42</code></p>
+    <p><strong>判定理由:</strong> 各行生成前に <code>set_seed(random_seed)</code>。<code>set_seed</code> は hashseed/cublas/random/numpy/torch/cudnn.deterministic/use_deterministic_algorithms/transformers.set_seed を設定。さらに <code>do_sample=False</code> でビーム探索は決定的（RNG 非依存）。再現性は構造的に担保。</p>
+    <p><strong>該当記述:</strong> <code>set_seed(random_seed)</code> → <code>model.generate(..., do_sample=False, early_stopping=True)</code></p>
+    <p><strong>備考:</strong> 行ごとの <code>signal.alarm(60)</code> は壁時計依存で、負荷次第で TimeoutError→<code>["time_out"]*n_samples</code> になり run 間で変わりうる非決定境界（HIGH にしない理由）。タイムアウト記録 or 正典 run はタイムアウト無しを推奨。</p>
+  </article>
+
+  <article class="item" data-item-id="C003" data-result="FAIL" data-confidence="MEDIUM">
+    <h3>[C003] 生成精度が非常に低い — 原因となるコードミスの探索 <span class="low">⚠️ 一部 LOW 確信度</span></h3>
+    <p class="meta">結果: <span class="badge FAIL">FAIL</span> | 確信度: MEDIUM</p>
+    <p><strong>確認した箇所:</strong> <code>src/gen_safe.py:47-68, 121-122</code>; 対比 <code>generation_safe_func.py:104-121</code>; <code>fragment_for_safe.py:27-76</code>; <code>safe_frags.py:40-48</code></p>
+    <p><strong>判定理由（機序別）:</strong></p>
+    <ul>
+      <li><strong>機序A（主因, MEDIUM）</strong>: 生の <code>pass_safe</code> をプレフィックス化して続きを生成。だが <code>pass_safe</code>/<code>full_safe</code> は独立に <code>convert2safe</code> され閉環番号が再割当されるため、<code>pass_safe</code> は <code>full_safe</code> の接頭辞にならない（実測反例: full=<code>C34=O.c13ccc5cc1C…</code> / pass=<code>c13ccc5cc1C…</code>）。学習系列に無い接頭辞＝OOD→無効/誤生成。従来 <code>generation_safe_func.py</code> は <code>SAFEDesign.scaffold_decoration/morphing</code> で条件付け。</li>
+      <li><strong>機序B（MEDIUM）</strong>: プレフィックスの開いた閉環番号を続きが正しく閉じる必要があるが番号対応が未調整→未閉環→<code>safe.decode</code> 失敗→'invalid' 多発。</li>
+      <li><strong>機序C（<span class="low">LOW</span>）</strong>: <code>early_stopping=True</code>＋min 長なしで早期 EOS→未完。A/B を増幅（要実行確認）。</li>
+      <li><strong>機序D（MEDIUM）</strong>: <code>num_return_sequences == num_beams == 50</code> で候補ほぼ重複→実効多様性激減、1 プレフィックスで 50 本全滅。</li>
+      <li><strong>機序E（<span class="low">LOW/MEDIUM</span>）</strong>: <code>max_length=200</code> は総長上限。長い scaffold で途中打ち切り→未閉環→invalid。<code>max_new_tokens</code> が安全。</li>
+      <li><strong>機序F（HIGH, 指標）</strong>: <code>n_valid</code> は重複も valid 計上。D と併せ validity 値が精度/一意性を反映しない（原因ではなく指標の注意）。</li>
+    </ul>
+    <p><strong>該当記述:</strong> <code>gen_smiles = _generate_valid_smiles(model, tokenizer, pass_safe, ...)</code></p>
+    <p><strong>バグ否定:</strong> <code>v[:, :-1]</code> は <code>[SEP]</code>(EOS) のみ除去し <code>[CLS]</code>+scaffold は保持 → 正しい。<code>safe.decode(fix, remove_dummies, ignore_errors)</code> は誤り耐性処理で根本原因ではない。</p>
+    <p><strong>備考:</strong> 根因は条件付け（A+B）。C/E/D が増幅、F は指標。実行して定量順位付け不能のため全体 MEDIUM。</p>
+  </article>
+</section>
+
+<section id="plan">
+  <h2>修正計画</h2>
+  <p>計画対象は FAIL の C003。全 Step の対象は <code>src/gen_safe.py</code>。Step 1 が決定打、Step 2 は LOW 確信度のため要ユーザー確認。</p>
+
+  <article class="step" data-step="1" data-related-items="C003">
+    <h3>Step 1: 条件付け方式の修正（根因 A+B）</h3>
+    <p><strong>対象ファイル:</strong> <code>src/gen_safe.py</code>（<code>_generate_valid_smiles</code>/<code>generate_from_model</code>）</p>
+    <p><strong>変更内容:</strong> 生 <code>pass_safe</code> プレフィックス方式を廃止し、(a) <code>pass_fragments</code> を <code>SAFEDesign.scaffold_decoration</code>/<code>scaffold_morphing</code> で条件付け（<code>generation_safe_func.py</code> に倣う）、または (b) 学習時と同一 <code>convert2safe(full)</code> 由来の保持部分から prefix を構築し閉環番号を整合、のいずれかをユーザー選択。</p>
+    <p><strong>依存関係:</strong> なし（主修正）</p>
+    <p><strong>対応するチェック項目:</strong> C003</p>
+  </article>
+
+  <article class="step" data-step="2" data-related-items="C003">
+    <h3>Step 2: 生成長・終了条件の制約（機序 C, E｜LOW・要確認）</h3>
+    <p><strong>対象ファイル:</strong> <code>src/gen_safe.py</code></p>
+    <p><strong>変更内容:</strong> <code>max_length=200</code>(総長) を <code>max_new_tokens</code> に置換。<code>min_new_tokens</code> 追加（または <code>early_stopping=True</code> 除去）で早期 EOS の未閉環を防止。</p>
+    <p><strong>依存関係:</strong> Step 1 の後</p>
+    <p><strong>対応するチェック項目:</strong> C003（機序 C・E は LOW 確信度。含めるか要確認）</p>
+  </article>
+
+  <article class="step" data-step="3" data-related-items="C003">
+    <h3>Step 3: 候補多様性の回復（機序 D）</h3>
+    <p><strong>対象ファイル:</strong> <code>src/gen_safe.py</code></p>
+    <p><strong>変更内容:</strong> <code>num_return_sequences</code> を <code>num_beams</code> から分離（top-k ≪ beams）、または <code>do_sample=True</code>+temperature/top-p に切替（<code>set_seed</code> 済で再現性維持）。</p>
+    <p><strong>依存関係:</strong> Step 1 の後（sampling 採用時は C002 決定性を再確認）</p>
+    <p><strong>対応するチェック項目:</strong> C003</p>
+  </article>
+
+  <article class="step" data-step="4" data-related-items="C003">
+    <h3>Step 4: 精度指標の是正（機序 F）</h3>
+    <p><strong>対象ファイル:</strong> <code>src/gen_safe.py</code></p>
+    <p><strong>変更内容:</strong> <code>n_valid</code>/報告精度を <strong>一意</strong> valid canonical SMILES で算出。任意で target 回収フラグを追加。</p>
+    <p><strong>依存関係:</strong> Step 3 の後</p>
+    <p><strong>対応するチェック項目:</strong> C003</p>
+  </article>
+
+  <article class="step" data-step="5" data-related-items="C002">
+    <h3>Step 5（任意）: タイムアウト再現性（C002 注意点）</h3>
+    <p><strong>対象ファイル:</strong> <code>src/gen_safe.py</code></p>
+    <p><strong>変更内容:</strong> 行ごとのタイムアウト発生をログ化、または正典 run はタイムアウト無しにして壁時計変動の影響を排除。</p>
+    <p><strong>依存関係:</strong> なし</p>
+    <p><strong>対応するチェック項目:</strong> C002</p>
+  </article>
+</section>
+
+<section id="next-actions">
+  <h2>次のアクション</h2>
+  <h3>🔧 修正計画の承認待ち</h3>
+  <p>計画を確認し、「OK」「進めて」等で承認すると実装（implementer 委譲）を開始します。承認までコードは変更しません。</p>
+  <h3>👀 ユーザー確認推奨 (PARTIAL or 確信度LOW)</h3>
+  <ul>
+    <li>[C003] Step 1 の方式 (a) SAFEDesign 経由 / (b) prefix 再構築 の選択が必要。</li>
+    <li>[C003] Step 2（機序 C・E）は LOW 確信度。決定打は Step 1 のため、含めるか要確認。</li>
+    <li>[C002] タイムアウトによる非決定境界の扱い（Step 5 は任意）。</li>
+  </ul>
+</section>
+</body>
+</html>

@@ -17,7 +17,9 @@ from pathlib import Path
 
 import torch
 from torch.utils.data import Dataset
-from transformers import AutoTokenizer, GPT2Config, GPT2LMHeadModel, PreTrainedTokenizerBase, Trainer, TrainingArguments, set_seed
+from transformers import AutoTokenizer, EarlyStoppingCallback, GPT2Config, GPT2LMHeadModel, PreTrainedTokenizerBase, Trainer, TrainingArguments
+
+from func.utility import set_seed
 
 def read_lines(path: Path) -> list[str]:
     """Read a newline-separated text file into a list of stripped lines.
@@ -159,13 +161,14 @@ if __name__ == "__main__":
         learning_rate=args.learning_rate,
         warmup_steps=args.warmup_steps,
         per_device_train_batch_size=args.per_device_train_batch_size,
-        per_device_eval_batch_size=args.per_device_train_batch_size,
         eval_strategy="steps",
         eval_steps=args.eval_steps,
         save_strategy="steps",
         save_steps=args.save_steps,
         save_total_limit=args.save_total_limit,
         load_best_model_at_end=True,
+        metric_for_best_model="eval_loss",
+        greater_is_better=False,
         seed=args.seed,
         report_to=["wandb"],
     )
@@ -176,6 +179,7 @@ if __name__ == "__main__":
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
         data_collator=DataCollatorForCausalLM(tokenizer.pad_token_id),
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=15)],
     )
     trainer.train()
 
