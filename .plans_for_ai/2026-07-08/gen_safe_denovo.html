@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Plan: pretrained SAFE-GPT de novo 生成 (2026-07-08)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; }
+  h1 { border-bottom: 2px solid #333; }
+  .step { margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plan: pretrained SAFE-GPT による de novo 生成（直接 vs de_novo_generation 比較）</h1>
+  <p class="meta">Date: 2026-07-08 | Status: pending-approval</p>
+</header>
+
+<section id="overview">
+  <h2>概要</h2>
+  <p>pretrained SAFE-GPT（ローカル保存: <code>models/safe_gpt/pretrained/</code>）で de novo 分子生成を行い、
+  2 通りの生成経路を比較する:</p>
+  <ol>
+    <li><strong>direct</strong>: <code>model.generate(inputs=None, do_sample=True, ...)</code> を直接呼び、
+      <code>safe.decode(fix=True, ...)</code> でデコード。</li>
+    <li><strong>library</strong>: <code>SAFEDesign.de_novo_generation(how="random", ...)</code> を使用。</li>
+  </ol>
+  <p>公平性のため両者は<strong>同一の <code>SAFEDesign</code> インスタンス</strong>（同 model/tokenizer/generation_config/
+  サンプリング設定/seed）を共有し、差分は生成コード経路のみとする。指標は <strong>Validity のみ</strong>。
+  de novo なので参照データセットは不要で、slice にも依存しない（モデル・出力パスに slice_name を含めない）。</p>
+
+  <h3>de_novo_generation の工夫（確認結果）</h3>
+  <p><code>SAFEDesign.de_novo_generation</code>(<code>safe/sample.py:726</code>) は薄いラッパーで本質は
+  <code>_generate</code>/<code>_decode_safe</code>:</p>
+  <ul>
+    <li><code>how="random"</code> → <code>do_sample=True</code>（多項サンプリングで多様性確保）</li>
+    <li>プレフィックス無し = <code>inputs=None</code> で BOS から生成</li>
+    <li>デコード時 <code>fix=True</code>（壊れた SAFE 文字列を修復）+ <code>remove_dummies=True</code> + <code>canonical=True</code></li>
+    <li><code>generation_config</code> に bos/eos/pad を補完、<code>token_type_ids</code> を除去</li>
+  </ul>
+  <p>direct 方式でもこの工夫（①do_sample=True ②inputs=None ③fix=True デコード）を再現する。</p>
+</section>
+
+<section id="plan">
+  <h2>実装計画</h2>
+  <ol>
+    <article class="step" data-step="1">
+      <li>
+        <h3>Step 1: 新規ファイルの骨格とデコードヘルパー</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_safe_denovo.py</code>（新規作成）</p>
+        <p><strong>変更内容:</strong> import（標準→サードパーティ→ローカル <code>func.utility.set_seed</code>）、
+          <code>CUDA_VISIBLE_DEVICES='0'</code>。
+          <code>_decode_safe_smiles(seq) -&gt; str | None</code>（<code>safe.decode(fix=True, remove_dummies=True,
+          canonical=True, ignore_errors=True, ...)</code> + RDKit None チェック）。</p>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+    <article class="step" data-step="2">
+      <li>
+        <h3>Step 2: 2 つの生成関数</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_safe_denovo.py</code></p>
+        <p><strong>変更内容:</strong>
+          <code>generate_denovo_direct(designer, n_samples, max_length)</code>:
+          <code>designer.model.generate(inputs=None, generation_config=designer.generation_config, do_sample=True,
+          num_return_sequences=n_samples, max_length=max_length, early_stopping=True)</code> →
+          <code>batch_decode</code> → <code>_decode_safe_smiles</code>。
+          <code>generate_denovo_library(designer, n_samples, max_length)</code>:
+          <code>designer.de_novo_generation(n_samples_per_trial=n_samples, sanitize=False, how="random",
+          max_length=max_length)</code> の結果を canonical 化。</p>
+        <p><strong>依存関係:</strong> Step 1 の後</p>
+      </li>
+    </article>
+    <article class="step" data-step="3">
+      <li>
+        <h3>Step 3: 指標計算（Validity のみ）</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_safe_denovo.py</code></p>
+        <p><strong>変更内容:</strong> <code>compute_validity(smiles_list) -&gt; dict</code>。
+          <code>n_total, n_valid, validity</code> を返す。docstring に戻り値キーを明記。</p>
+        <p><strong>依存関係:</strong> Step 1 の後</p>
+      </li>
+    </article>
+    <article class="step" data-step="4">
+      <li>
+        <h3>Step 4: 比較ドライバ</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_safe_denovo.py</code></p>
+        <p><strong>変更内容:</strong> <code>run_denovo_comparison(model_path, output_dir,
+          n_samples=1000, max_length=200, random_seed=42) -&gt; pd.DataFrame</code>。
+          1 つの <code>SAFEDesign</code> を生成し、各手法で <code>set_seed</code> → 生成 → <code>compute_validity</code>。
+          生成 SMILES を <code>{output_dir}/{method}/generated.csv</code>、サマリを
+          <code>{output_dir}/comparison.csv</code>（列: <code>method, n_total, n_valid, validity</code>）に保存し print。</p>
+        <p><strong>依存関係:</strong> Step 2, 3 の後</p>
+      </li>
+    </article>
+    <article class="step" data-step="5">
+      <li>
+        <h3>Step 5: __main__ ブロック</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_safe_denovo.py</code></p>
+        <p><strong>変更内容:</strong> <code>gen_safe.py</code> に倣い、
+          <code>model_path=f'{fd}/models/safe_gpt/pretrained'</code>、
+          <code>output_dir=f'{fd}/results/safe_gpt/pretrained/safe/denovo/'</code>（slice 非依存）で
+          <code>run_denovo_comparison(...)</code> を呼ぶ。</p>
+        <p><strong>依存関係:</strong> Step 4 の後</p>
+      </li>
+    </article>
+  </ol>
+</section>
+
+<section id="notes">
+  <h2>確認事項</h2>
+  <ul>
+    <li>実行環境は conda <code>safe</code>。<code>src/</code> をカレントにして実行（既存 <code>gen_safe.py</code> と同じ import 前提）。</li>
+    <li>既定 <code>n_samples=1000</code>。</li>
+    <li>指標は Validity のみ（参照データセット不要、slice 非依存）。</li>
+  </ul>
+</section>
+</body>
+</html>

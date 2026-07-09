@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Checklist Review: gen_safe 最終版 (2026-07-08)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; color: #222; }
+  h1 { border-bottom: 2px solid #333; }
+  h2 { border-bottom: 1px solid #ccc; margin-top: 1.8em; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; font-size: 0.88em; }
+  table { border-collapse: collapse; margin: 1em 0; }
+  th, td { border: 1px solid #ccc; padding: 0.3em 0.8em; text-align: left; }
+  th { background: #f4f4f4; }
+  .verdict { background: #e8f5e9; border-left: 6px solid #2e7d32; padding: 1em 1.2em; border-radius: 4px; margin: 1em 0; }
+  .verdict ul { margin: 0.4em 0; }
+  .item { margin: 1em 0; padding: 0.8em 1em; border-left: 6px solid #999; background: #fafafa; border-radius: 3px; }
+  .item[data-result="PASS"] { border-left-color: #2e7d32; }
+  .item[data-result="MIXED"] { border-left-color: #ef6c00; }
+  .badge { display: inline-block; padding: 0.05em 0.5em; border-radius: 3px; font-size: 0.8em; color: #fff; }
+  .b-PASS { background: #2e7d32; } .b-MIXED { background: #ef6c00; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Checklist Review: gen_safe <span style="font-size:0.6em;color:#888;">最終版 rev3</span></h1>
+  <p class="meta">
+    Checklist source: <code>check_list.txt</code><br>
+    Target: <code>src/gen_safe.py</code>（＋生成本体 <code>src/func/generation_safe_func.py</code>）<br>
+    Generated: 2026-07-08（会話を踏まえた最終結論を反映） | Status: concluded（実装は保留）
+  </p>
+</header>
+
+<section id="verdict">
+  <h2>最終結論（TL;DR）</h2>
+  <div class="verdict">
+    <p><strong>分子生成コードの核心ロジックは「間違っていない」。</strong> 低い有効SMILES率の主因はコードのバグではなく、SAFEライブラリ＋モデル側の限界。</p>
+    <ul>
+      <li>✅ <strong>実バグは1点のみ</strong>: <code>generation_safe_func.py:100</code> の <code>kwargs</code> を生成呼び出しに渡していない（+<code>num_beams=args.n_samples</code> の誤用、<code>num_beam_groups=0.0</code> float）。ユーザーも自認済み。<strong>効くのは「多様性」で、無効SMILESの主因ではない</strong>。</li>
+      <li>✅ <strong>2段階生成（morphing/decoration → 残った <code>*</code> を埋める）は意図的で妥当な設計</strong>。<code>scaffold_morphing</code> が複数フラグメントで <code>*</code> を残すのはライブラリ内部の挙動で、2段目で埋める発想は正しい。<strong>バグではない</strong>。</li>
+      <li>⚠️ <strong><code>safe_invalid</code> / None / タイムアウトの多さ = 手法・モデル側の限界</strong>（荷電・複数アタッチメント分子で SAFE 生成/デコードが失敗しやすい、生成が遅い）。コードの誤りではない。</li>
+      <li>🩹 <code>MACHINE_ID</code> 未定義・旧称パス（our_slice/pretrained）はコミット版が古いだけで、<strong>実行環境では是正済み</strong>のため実害なし。</li>
+      <li>🔁 <strong>撤回（実測で否定）</strong>: 「list への numpy 配列 indexing でクラッシュ」／「<code>add_dot</code> が原因」。いずれも誤り。断定を急いで2回外した点はお詫び。</li>
+    </ul>
+  </div>
+</section>
+
+<section id="facts">
+  <h2>調査で確認した事実（実データ・実行）</h2>
+  <h3>実データ統計</h3>
+  <p>出力 <code>mol_gen_frags_oxygen/results/safe_gpt/trained/safe/brics/beam/normal/predictions_*.csv</code>（25,000分子×50=125万スロット）:</p>
+  <table>
+    <tr><th>値</th><th>割合</th></tr>
+    <tr><td><code>safe_invalid</code></td><td>38.6%</td></tr>
+    <tr><td><code>time_out</code></td><td>25.5%</td></tr>
+    <tr><td><code>Can't generate</code>（旧版コード産物）</td><td>20.2%</td></tr>
+    <tr><td>有効SMILES様</td><td>15.6%</td></tr>
+    <tr><td><code>error</code></td><td>~0%</td></tr>
+  </table>
+  <p>先頭500分子: 平均ユニーク有効 5.2／分子、<strong>40.8%（204/500）が有効ゼロ</strong>。<br>
+  ※ <code>Can't generate</code> は現行コード・safeライブラリに無い文字列 → この結果は旧版コードの産物。</p>
+
+  <h3>実行診断（brics trained model、ラベル前の生出力を分類）</h3>
+  <ul>
+    <li><code>scaffold_morphing</code>/<code>scaffold_decoration</code> が未充填 <code>[*:N]</code> を残す分子を頻出（<code>*</code> は1個とは限らず複数あり得る）。</li>
+    <li>2段目 <code>scaffold_decoration(how='greedy')</code> の失敗機構:
+      <ul>
+        <li><strong>1個の <code>*</code></strong>: モデルが greedy 生成中に自分で <code>.</code> と別フラグメントを付加 → 複数フラグメント → <code>safe_invalid</code>。<br>
+          例: <code>Nc1ccc(S(=O)(=O)c2nc(N[*:4])no2)cc1</code> → <code>CCNc1noc(...)n1.CC[C@@H](C)OC</code></li>
+        <li><strong>2〜3個の <code>*</code></strong>: 軒並み None（この小テストでは全滅）。</li>
+      </ul>
+    </li>
+    <li><strong><code>add_dot=True/False</code> は出力が完全に同一</strong> → 余分フラグメントは <code>add_dot</code> の末尾ドットではなく、モデル自身の greedy 生成が原因（＝add_dot 仮説は否定）。</li>
+    <li>単フラグメント decoration で <code>_decode_safe(ignore_errors=True)</code> が None（デコード不能SAFE）を返すケース頻出（一例で20件中18件 None）。</li>
+  </ul>
+</section>
+
+<section id="items">
+  <h2>チェック項目ごとの最終判定</h2>
+
+  <article class="item" data-result="PASS">
+    <h3>[C001] 学習済みモデルを読み込んで生成ができている。</h3>
+    <p class="meta">結果: <span class="badge b-PASS">PASS（実運用）</span> ／ コミット版は要整備 | 確信度: HIGH</p>
+    <p>実行環境では <code>trained/</code> の正しいモデル・データで生成できている（ユーザー確認）。コミット版のみ旧称パス・<code>MACHINE_ID</code> 未定義で未整備。症状の原因ではない。</p>
+  </article>
+
+  <article class="item" data-result="PASS">
+    <h3>[C002] 分子生成コードに再現性がある。</h3>
+    <p class="meta">結果: <span class="badge b-PASS">PASS</span> | 確信度: MEDIUM</p>
+    <p><code>set_seed</code> が random/numpy/torch(cuda)/cudnn/<code>use_deterministic_algorithms</code> を網羅設定。各分子ループで seed 設定、<code>do_sample=False</code> の決定的デコード。堅牢。</p>
+  </article>
+
+  <article class="item" data-result="MIXED">
+    <h3>[C003] 生成精度が低い原因（コードのミスか）</h3>
+    <p class="meta">結果: <span class="badge b-MIXED">コード起因は限定的</span>（実バグは kwargs の1点のみ） | 確信度: HIGH</p>
+    <p>低有効率の主因は SAFEライブラリ/モデルの生成・デコード失敗とタイムアウト（手法側の限界）。2段階充填の設計自体は妥当。当初挙げた indexing・add_dot は実測で否定。</p>
+  </article>
+</section>
+
+<section id="optional">
+  <h2>直すなら（任意・強制しない）</h2>
+  <p>ユーザー方針により「無理に直さない」。参考として、コード起因で明確に直せるのは以下のみ。</p>
+  <ul>
+    <li><strong>kwargs 伝播の修正</strong>（多様性向け）: <code>generation_safe_func.py:100,103-119</code>。<code>how</code>/<code>num_beams=args.num_beams</code>/<code>do_sample</code> を実際に渡す。<code>num_beam_groups</code> は int。</li>
+    <li>（任意）コミットファイル整備: パス（pretrained→trained, our_slice→rc_cms, dataset に <code>/normal/</code>）、<code>MACHINE_ID</code>→<code>args.machine_id</code>。</li>
+    <li>（任意・ユーザー自己修正予定）ハードコード: <code>range(25000)</code>（76行）、<code>n_samples_per_trial=50</code>（105,115行）、<code>signal.alarm(60)</code>（95行）。</li>
+  </ul>
+  <p>有効率そのものの改善は手法・モデル側の課題で、コード修正だけでは限界がある（実測で確認済み）。</p>
+</section>
+
+<section id="notes">
+  <h2>備考</h2>
+  <ul>
+    <li>このレビューは read-only 調査。<code>src/</code> への変更は行っていない。</li>
+    <li>診断スクリプトは一時領域（<code>/tmp/</code>）に作成、リポジトリは未変更。</li>
+  </ul>
+</section>
+</body>
+</html>

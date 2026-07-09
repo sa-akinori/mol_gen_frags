@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Plan: 事前学習の学習曲線 (2026-07-08)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; }
+  h1 { border-bottom: 2px solid #333; }
+  .step { margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid #ccc; padding: 0.4em 0.6em; text-align: left; font-size: 0.9em; }
+  th { background: #f4f4f4; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plan: 事前学習の学習曲線（SAFE-GPT / RFFMG-T5）</h1>
+  <p class="meta">Date: 2026-07-08 | Status: approved</p>
+</header>
+
+<section id="overview">
+  <h2>概要</h2>
+  <p>SAFE-GPT と RFFMG-T5 の学習過程を可視化するため、<strong>loss（縦軸）vs steps（横軸）</strong>の学習曲線を描く。</p>
+  <p>前提: ダウンロードした「pretrained」モデルには学習ログが無く、ログが残るのはユーザーが実行した学習run（wandb オフライン）のみ。よって本タスクの「事前学習の学習曲線」= これら学習runの曲線として描く。両モデルとも wandb に <code>train/loss</code> / <code>eval/loss</code> / <code>train/global_step</code> を記録済み（eval行にも <code>train/global_step</code> が入る）。損失は <code>wandb.sdk.internal.datastore</code> で <code>run-*.wandb</code> から抽出可能（検証済み）。run名の旧称: <code>dummy</code>=<code>rffmg</code>、<code>our_slice</code>=<code>rc_cms</code>。history item のキーは <code>item.key or '/'.join(item.nested_key)</code>。</p>
+  <h3>ユーザー確定事項</h3>
+  <ul>
+    <li>フラグメント手法: <strong>rc_cms + brics 両方</strong></li>
+    <li>T5の種別: <strong>trained + from_scratch 両方</strong>（SAFEは from_scratch run が無く trained のみ）</li>
+    <li>図の構成: <strong>モデルごとに別ファイル</strong></li>
+    <li>損失: <strong>train + eval loss 両方</strong>を1枚に重ねる</li>
+  </ul>
+  <h3>出力（合計6枚、<code>figures/learning_curves/</code> 配下）</h3>
+  <ul>
+    <li><code>rffmg_t5_trained_brics.png</code></li>
+    <li><code>rffmg_t5_trained_rc_cms.png</code></li>
+    <li><code>rffmg_t5_from_scratch_brics.png</code></li>
+    <li><code>rffmg_t5_from_scratch_rc_cms.png</code></li>
+    <li><code>safe_gpt_brics.png</code></li>
+    <li><code>safe_gpt_rc_cms.png</code></li>
+  </ul>
+  <h3>採用run（同一構成に複数runあり→ step数最大を採用）</h3>
+  <table>
+    <tr><th>出力名</th><th>wandbディレクトリ</th><th>max step</th></tr>
+    <tr><td>rffmg_t5_trained_brics</td><td><code>wandb/offline-run-20250907_114610-c54mbj4m</code></td><td>3,315,000</td></tr>
+    <tr><td>rffmg_t5_trained_rc_cms</td><td><code>wandb/offline-run-20250903_155930-1bb137m9</code></td><td>3,130,000</td></tr>
+    <tr><td>rffmg_t5_from_scratch_brics</td><td><code>wandb/offline-run-20250925_104927-gf6oysoc</code></td><td>2,005,000</td></tr>
+    <tr><td>rffmg_t5_from_scratch_rc_cms</td><td><code>wandb/offline-run-20250925_104947-sa7dxu6r</code></td><td>2,375,000</td></tr>
+    <tr><td>safe_gpt_brics</td><td><code>wandb/offline-run-20250920_111843-lxs32jiy</code></td><td>715,000</td></tr>
+    <tr><td>safe_gpt_rc_cms</td><td><code>wandb/offline-run-20250913_185038-i0hyt8qz</code></td><td>2,420,000</td></tr>
+  </table>
+</section>
+
+<section id="plan">
+  <h2>実装計画</h2>
+  <ol>
+    <article class="step" data-step="1">
+      <li>
+        <h3>Step 1: wandb import を追加</h3>
+        <p><strong>対象ファイル:</strong> <code>src/figure.py</code>（先頭サードパーティimport群、13行目 <code>from rdkit import Chem</code> 付近）</p>
+        <p><strong>変更内容:</strong> <code>from wandb.sdk.internal import datastore</code> と <code>from wandb.proto import wandb_internal_pb2 as wandb_pb</code> を追加。</p>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+    <article class="step" data-step="2">
+      <li>
+        <h3>Step 2: wandbからloss履歴を抽出する関数を追加</h3>
+        <p><strong>対象ファイル:</strong> <code>src/figure.py</code>（<code>frag_num_analyze</code> 直後、<code>if __name__</code> の直前）</p>
+        <p><strong>変更内容:</strong> <code>read_wandb_loss_history(run_path: str) -&gt; pd.DataFrame</code> を追加。<code>datastore.DataStore().open_for_scan</code> で走査し history レコードを収集。キーは <code>item.key or '/'.join(item.nested_key)</code>、値は <code>float(value_json)</code>。<code>train/global_step</code> を step、<code>train/loss</code>/<code>eval/loss</code> を各行から拾う。返り値カラム: <code>step</code>(int), <code>train_loss</code>(float,NaN可), <code>eval_loss</code>(float,NaN可)、step昇順。型ヒント・Google style docstring・カラム名明記。</p>
+        <p><strong>依存関係:</strong> Step 1 の後</p>
+      </li>
+    </article>
+    <article class="step" data-step="3">
+      <li>
+        <h3>Step 3: 学習曲線を描画・保存する関数を追加</h3>
+        <p><strong>対象ファイル:</strong> <code>src/figure.py</code>（Step 2 の関数の直後）</p>
+        <p><strong>変更内容:</strong> <code>plot_learning_curve(history: pd.DataFrame, save_path: str, title: str) -&gt; None</code> を追加。train_loss/eval_loss を <code>dropna()</code> して step(x) vs loss(y) の2本を描画（凡例つき、train実線/eval区別）。軸ラベル Steps/Loss、title設定、<code>os.makedirs</code>→<code>savefig</code>→<code>plt.close()</code>。eval空でも描けるようガード。</p>
+        <p><strong>依存関係:</strong> Step 2 の後</p>
+      </li>
+    </article>
+    <article class="step" data-step="4">
+      <li>
+        <h3>Step 4: 実行ブロックをファイル末尾に追加</h3>
+        <p><strong>対象ファイル:</strong> <code>src/figure.py</code>（<code>if __name__ == "__main__":</code> 内の最終ブロックとして末尾）</p>
+        <p><strong>変更内容:</strong> 新規 <code>if 1:</code> ブロックを追加。採用run表の対応辞書（出力名→wandbディレクトリ相対パス）を定義し、<code>out_dir = f'{fd}/figures/learning_curves'</code>、各runを <code>glob(f'{fd}/{run_dir}/run-*.wandb')[0]</code> で解決→<code>read_wandb_loss_history</code>→<code>plot_learning_curve</code>。<code>fd</code> は既存の <code>__main__</code> 冒頭定義を流用。</p>
+        <p><strong>依存関係:</strong> Step 3 の後</p>
+      </li>
+    </article>
+    <article class="step" data-step="5">
+      <li>
+        <h3>Step 5: 既存アクティブブロックを無効化</h3>
+        <p><strong>対象ファイル:</strong> <code>src/figure.py</code>（205行目 <code>if 1:</code>）</p>
+        <p><strong>変更内容:</strong> 205行目の <code>if 1:</code> を <code>if 0:</code> に戻し、新ブロックのみが実行されるようにする（単一ブロック運用の踏襲）。</p>
+        <p><strong>依存関係:</strong> Step 4 の後</p>
+      </li>
+    </article>
+  </ol>
+</section>
+
+<section id="verification">
+  <h2>検証</h2>
+  <ol>
+    <li>実行: <code>conda run -n safe python src/figure.py</code></li>
+    <li><code>ls -l figures/learning_curves/</code> で6枚のPNG生成を確認</li>
+    <li>各PNGを開き、横軸=Steps・縦軸=Loss で train/eval 2本が描かれ、step範囲が採用run表と整合していることを目視確認</li>
+    <li>任意: <code>read_wandb_loss_history</code> を1runで単体実行し、末尾 eval_loss が既知値（rc_cms SAFE ≈ 0.477、trained rc_cms T5 ≈ 0.149）に近いことを確認</li>
+  </ol>
+</section>
+</body>
+</html>

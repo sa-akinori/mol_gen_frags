@@ -13,8 +13,8 @@ if __name__ =='__main__':
 
     parser.add_argument('--model_name', type=str, choices=['t5chem', 'safe_gpt'],
                         help='Model name (default: t5chem)')
-    parser.add_argument('--model_ver', type=str, default='trained', choices=['trained', 'pretrained', 'from_scratch'],
-                        help='Phase name (default: trained)')
+    parser.add_argument('--model_ver', type=str, default='finetuning', choices=['finetuning', 'pretrained', 'from_scratch'],
+                        help='Phase name (default: finetuning)')
     parser.add_argument('--frag_method', type=str, default='rc_cms', choices=['rc_cms', 'brics'],
                         help='Fragmentation method (default: rc_cms)')
     parser.add_argument('--additional_path', type=str, default='normal', choices=['normal', 'dup_frags', 'frag_num', 'frag_order', 'attach_point_num'],
@@ -24,6 +24,7 @@ if __name__ =='__main__':
     # Setting
     model_name  = args.model_name
     str_name    = 'rffmg' if model_name=='t5chem' else 'safe'
+    model_dir   = 't5chem' if model_name=='t5chem' else 'gpt'
     model_ver   = args.model_ver
     frag_method = args.frag_method
     additional_path = args.additional_path
@@ -49,11 +50,11 @@ if __name__ =='__main__':
         trPhysicprop_df.to_csv(f'{BASEPATH}/results/train_physic_property.csv')
         
     
-    outfd = f'{BASEPATH}/results/{model_name}/{model_ver}/{str_name}/{frag_method}/beam/{additional_path}'
-    
+    outfd = f'{BASEPATH}/results/{str_name}/{model_dir}/{model_ver}/{frag_method}/beam/{additional_path}'
+
     ## Calculate physical property
     # Define file path
-    file_name = f'{BASEPATH}/results/{model_name}/{model_ver}/{str_name}/{frag_method}/beam/{additional_path}/predictions.csv'
+    file_name = f'{BASEPATH}/results/{str_name}/{model_dir}/{model_ver}/{frag_method}/beam/{additional_path}/predictions.csv'
     
     # Evaluation gen mols
     genmols = loadGenSmiles(model_name, file_name, testInputfile)
@@ -68,7 +69,7 @@ if __name__ =='__main__':
 
     # Evaluation metrics only for fragments used in frag_order (to compare the performance between unshuffled and shuffled fragment orders)
     if additional_path == 'frag_order':
-        outfd  = f'{BASEPATH}/results/{model_name}/{model_ver}/{str_name}/{frag_method}/beam'
+        outfd  = f'{BASEPATH}/results/{str_name}/{model_dir}/{model_ver}/{frag_method}/beam'
         datafd = f'{BASEPATH}/data/{str_name}/{frag_method}/'
         no_shuffle_df = pd.read_csv(f'{outfd}/normal/curated_data.tsv', sep='\t', index_col=0)
         random_get_id = pickle_load(f'{datafd}/frag_order/random_get_ids.pkl')

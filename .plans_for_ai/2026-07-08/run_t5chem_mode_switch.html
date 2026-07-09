@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Plan: run_t5chem.sh 学習モード切替 (2026-07-08)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; }
+  h1 { border-bottom: 2px solid #333; }
+  .step { margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+  pre { background: #f4f4f4; padding: 1em; border-radius: 4px; overflow-x: auto; }
+  table { border-collapse: collapse; }
+  th, td { border: 1px solid #ccc; padding: 0.3em 0.6em; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plan: run_t5chem.sh に学習モード（from_scratch / finetune）切替を追加</h1>
+  <p class="meta">Date: 2026-07-08 | Status: pending-approval</p>
+</header>
+
+<section id="overview">
+  <h2>概要</h2>
+  <p><code>run_safe.sh</code> と同様に <code>src/train_model/run_t5chem.sh</code> に <code>MODE</code> 変数
+  （<code>finetune</code> / <code>from_scratch</code>）を導入し、<code>if/else</code> で切り替える。</p>
+  <p>t5chem のモード分岐は <strong><code>--pretrain</code> の有無</strong>: 付ければ重みを継承（finetune）、
+  無ければ <code>--tokenizer</code> 種別の語彙で <code>T5Config(num_layers=4, num_heads=8, d_model=256)</code> を構築し
+  ランダム初期化（from_scratch）。</p>
+  <p><strong>確認済み整合性:</strong> pretrained t5chem の config は <code>4層/256次元</code>で from_scratch の構築と一致。
+  pretrained の <code>vocab.txt</code>（75行, <code>tokenizer: simple</code>）と同梱 <code>vocab/simple.txt</code> は完全一致。
+  よって from_scratch は <code>--tokenizer simple</code> 指定で同一構造・同一語彙のランダム初期化になる。</p>
+  <table>
+    <tr><th>MODE</th><th>モデル引数</th><th>--output_dir</th></tr>
+    <tr><td>finetune</td><td>--pretrain models/t5chem/pretrained</td><td>models/t5chem/finetuning/rffmg/${FRAG_NAME}</td></tr>
+    <tr><td>from_scratch</td><td>--tokenizer simple</td><td>models/t5chem/from_scratch/rffmg/${FRAG_NAME}</td></tr>
+  </table>
+  <p>学習率は両モードとも t5chem デフォルト（<code>--init_lr</code> 未指定＝5e-4）で統一方針と整合。
+  <code>--task_type product</code>, <code>--num_epoch 50</code> も現状維持。</p>
+</section>
+
+<section id="plan">
+  <h2>実装計画</h2>
+  <ol>
+    <article class="step" data-step="1">
+      <li>
+        <h3>Step 1: run_t5chem.sh にモード切替を実装</h3>
+        <p><strong>対象ファイル:</strong> <code>src/train_model/run_t5chem.sh</code></p>
+        <p><strong>変更内容:</strong> <code>MODE</code> 変数を追加。<code>if/elif/else</code> で <code>MODEL_ARG</code> と
+          <code>OUTPUT_DIR</code> を切替（未知の MODE は stderr にエラー出力して <code>exit 1</code>）。
+          <code>t5chem train</code> を複数行化し <code>${MODEL_ARG}</code> / <code>--output_dir ${OUTPUT_DIR}</code> を使用。
+          他の引数（<code>--data_dir</code>, <code>--task_type product</code>, <code>--num_epoch 50</code>）は現状維持。</p>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+  </ol>
+
+  <h3>実装後の run_t5chem.sh（想定内容）</h3>
+  <pre><code>#!/usr/bin/env bash
+export CUDA_VISIBLE_DEVICES=0
+
+# conda setup
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate t5chem
+
+FRAG_NAME="rc_cms"          # "brics" or "rc_cms"
+MODE="finetune"            # "finetune" or "from_scratch"
+
+if [ "$MODE" = "finetune" ]; then
+    MODEL_ARG="--pretrain models/t5chem/pretrained"
+    OUTPUT_DIR="models/t5chem/finetuning/rffmg/${FRAG_NAME}"
+elif [ "$MODE" = "from_scratch" ]; then
+    MODEL_ARG="--tokenizer simple"
+    OUTPUT_DIR="models/t5chem/from_scratch/rffmg/${FRAG_NAME}"
+else
+    echo "Unknown MODE: ${MODE} (use 'finetune' or 'from_scratch')" &gt;&amp;2
+    exit 1
+fi
+
+t5chem train \
+--data_dir data/rffmg/${FRAG_NAME}/normal \
+--output_dir ${OUTPUT_DIR} \
+${MODEL_ARG} \
+--task_type product \
+--num_epoch 50</code></pre>
+</section>
+
+<section id="notes">
+  <h2>確認事項</h2>
+  <ul>
+    <li>既定は <code>MODE="finetune"</code>。</li>
+    <li>from_scratch は <code>--tokenizer simple</code> を明示（pretrained と同一語彙、警告回避）。</li>
+    <li>t5chem の finetune 出力は <code>finetuning/</code>（ユーザー指定）。safe 側の <code>trained/</code> とは名称が異なる点は許容。</li>
+    <li>対象は <code>run_t5chem.sh</code> のみ。生成側・oxygen への適用は含めない。</li>
+  </ul>
+</section>
+</body>
+</html>

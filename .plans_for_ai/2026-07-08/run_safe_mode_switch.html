@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Plan: run_safe.sh 学習モード切替 (2026-07-08)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; }
+  h1 { border-bottom: 2px solid #333; }
+  .step { margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+  pre { background: #f4f4f4; padding: 1em; border-radius: 4px; overflow-x: auto; }
+  table { border-collapse: collapse; }
+  th, td { border: 1px solid #ccc; padding: 0.3em 0.6em; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plan: run_safe.sh に学習モード（from_scratch / finetune）切替を追加</h1>
+  <p class="meta">Date: 2026-07-08 | Status: pending-approval</p>
+</header>
+
+<section id="overview">
+  <h2>概要</h2>
+  <p><code>src/train_model/run_safe.sh</code> は現状 <code>--model_path</code> を渡さず常に<strong>ゼロ学習</strong>になり、
+  出力先も <code>models/safe_gpt/trained/</code>（規約では trained=ファインチューニング）固定で両立できない。
+  <code>MODE</code> 変数（<code>from_scratch</code> / <code>finetune</code>）を導入し bash の <code>if/else</code> で切り替える。</p>
+  <table>
+    <tr><th>MODE</th><th>--model_path</th><th>--output_dir</th></tr>
+    <tr><td>finetune</td><td>models/safe_gpt/pretrained を付与（重み継承）</td><td>models/safe_gpt/trained/safe/${FRAG_NAME}/</td></tr>
+    <tr><td>from_scratch</td><td>付与しない（ランダム初期化）</td><td>models/safe_gpt/from_scratch/safe/${FRAG_NAME}/</td></tr>
+  </table>
+  <p><code>--config</code> / <code>--tokenizer</code> は両モードとも pretrained のものを使用（構造・語彙を揃え比較を公平に）。
+  その他のハイパーパラメータは現状維持。</p>
+</section>
+
+<section id="plan">
+  <h2>実装計画</h2>
+  <ol>
+    <article class="step" data-step="1">
+      <li>
+        <h3>Step 1: run_safe.sh にモード切替を実装</h3>
+        <p><strong>対象ファイル:</strong> <code>src/train_model/run_safe.sh</code></p>
+        <p><strong>変更内容:</strong> <code>MODE</code> 変数と <code>PRETRAINED_DIR</code> を追加。
+          <code>if/elif/else</code> で <code>MODEL_PATH_ARG</code> と <code>OUTPUT_DIR</code> を切替（未知の MODE は
+          stderr にエラー出力して <code>exit 1</code>）。<code>safe-train</code> 呼び出しで
+          <code>${MODEL_PATH_ARG}</code>（空なら無視）と <code>--output_dir ${OUTPUT_DIR}</code>、
+          <code>--config</code>/<code>--tokenizer</code> は <code>${PRETRAINED_DIR}</code> 配下を使用。他の引数は現状維持。</p>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+  </ol>
+
+  <h3>実装後の run_safe.sh（想定内容）</h3>
+  <pre><code>#!/usr/bin/env bash
+export CUDA_VISIBLE_DEVICES=0
+
+# conda setup
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate safe
+
+FRAG_NAME="rc_cms"          # "brics" or "rc_cms"
+MODE="finetune"            # "finetune" or "from_scratch"
+
+PRETRAINED_DIR="models/safe_gpt/pretrained"
+
+if [ "$MODE" = "finetune" ]; then
+    MODEL_PATH_ARG="--model_path ${PRETRAINED_DIR}"
+    OUTPUT_DIR="models/safe_gpt/trained/safe/${FRAG_NAME}/"
+elif [ "$MODE" = "from_scratch" ]; then
+    MODEL_PATH_ARG=""
+    OUTPUT_DIR="models/safe_gpt/from_scratch/safe/${FRAG_NAME}/"
+else
+    echo "Unknown MODE: ${MODE} (use 'finetune' or 'from_scratch')" &gt;&amp;2
+    exit 1
+fi
+
+safe-train \
+${MODEL_PATH_ARG} \
+--config ${PRETRAINED_DIR}/config.json \
+--tokenizer ${PRETRAINED_DIR}/tokenizer.json \
+--dataset data/safe/${FRAG_NAME}/normal \
+--output_dir ${OUTPUT_DIR} \
+--text_column full_safe \
+--num_train_epochs 50 \
+--learning_rate 1e-4 \
+--warmup_steps 10000 \
+--do_train \
+--do_eval \
+--eval_strategy steps \
+--per_device_train_batch_size 32 \
+--eval_steps 5000 \
+--save_strategy steps \
+--save_steps 5000 \
+--save_total_limit 5 \
+--load_best_model_at_end</code></pre>
+</section>
+
+<section id="notes">
+  <h2>確認事項</h2>
+  <ul>
+    <li>既定は <code>MODE="finetune"</code>（元の意図＝ファインチューニングと解釈）。ゼロ学習時は手で <code>from_scratch</code> に変更。</li>
+    <li>空の <code>${MODEL_PATH_ARG}</code> は行継続と併用しても問題なく無視される。</li>
+    <li>対象は <code>run_safe.sh</code> のみ。生成側（<code>gen_safe.py</code> / <code>gen_safe_denovo.py</code>）の
+      <code>from_scratch/</code> モデル読込パス変更は含めない（必要なら別途）。</li>
+    <li><code>mol_gen_frags_oxygen</code> の同名スクリプトへの適用は要望があれば別途。</li>
+  </ul>
+</section>
+</body>
+</html>

@@ -44,6 +44,8 @@ def main():
     parser.add_argument('--num_beams', type=int, default=50,
                         help='Number of beams for beam search (default: 50)')
     parser.add_argument('--random_seed', type=int, default=42)
+    parser.add_argument('--use_full_dataset', type=bool, default=False)
+    parser.add_argument('--max_dataset_num', type=int, default=25000)
     
     # Output parameters
     parser.add_argument('--output_dir', type=str, default=None,
@@ -73,7 +75,7 @@ def main():
     safe_generator = SAFEDesign(model=model, tokenizer=tokenizer)
     
     # Split indices
-    indices = np.array_split(range(25000), args.total_machines)[args.machine_id]
+    indices = np.array_split(range(args.max_), args.total_machines)[args.machine_id]
     
     gen_mols_results = list()
     error_logs = list() 
@@ -97,12 +99,12 @@ def main():
         try:
 
             safe_generator.generation_config.diversity_penalty = 0.0
-            kwargs = {'how':'beam', 'num_beams':args.n_samples, 'num_beam_groups':0.0}
+            kwargs = {'how':'beam', 'num_beams':args.num_beams, 'num_beam_groups':0.0}
 
             if len(pass_frag.split('.')) == 1:
                 gen_mols = safe_generator.scaffold_decoration(
                         scaffold=pass_frag,
-                        n_samples_per_trial=50, 
+                        n_samples_per_trial=args.n_samples,
                         n_trials=1,
                         do_sample=False,
                         random_seed=args.random_seed,
@@ -112,7 +114,7 @@ def main():
             else:
                 gen_mols = safe_generator.scaffold_morphing(
                         side_chains=pass_frag.split('.'),
-                        n_samples_per_trial=50, 
+                        n_samples_per_trial=args.n_samples,
                         n_trials=1,
                         random_seed=args.random_seed,
                         max_length=args.max_length
@@ -129,6 +131,7 @@ def main():
                             random_seed=args.random_seed,
                             max_length=args.max_length
                             )[0] if '*' in gen_mol and len(gen_mol.split('.')) == 1 else gen_mol for gen_mol in gen_mols]
+            
             new_gen_mols = ['safe_invalid' if new_gen_mol == None else new_gen_mol for new_gen_mol in new_gen_mols]
             new_gen_mols = ['safe_invalid' if len(new_gen_mol.split('.')) != 1 else new_gen_mol for new_gen_mol in new_gen_mols]
             

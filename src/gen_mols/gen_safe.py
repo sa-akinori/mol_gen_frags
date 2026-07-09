@@ -10,8 +10,8 @@ if __name__=='__main__':
 
     parser.add_argument('--frag_method', type=str, default='brics', choices=['brics', 'rc_cms'],
                         help='Fragmentation method (default: brics)')
-    parser.add_argument('--model_ver', type=str, default='trained', choices=['trained', 'pretrained'],
-                        help='Phase name (default: trained)')
+    parser.add_argument('--model_ver', type=str, default='finetuning', choices=['finetuning', 'from_scratch', 'pretrained'],
+                        help='Phase name (default: finetuning)')
     parser.add_argument('--n_samples', type=int, default=50,
                         help='Number of samples to generate per molecule (default: 50)')
     parser.add_argument('--max_length', type=int, default=200,
@@ -30,13 +30,13 @@ if __name__=='__main__':
     model_ver = args.model_ver
     dataset_dir = f'{BASEPATH}/data/safe/{frag_method}/normal/'
     
-    if model_ver == 'trained':
-        model_path = f'{BASEPATH}/models/safe_gpt/trained/safe/{frag_method}/best_model'
-        output_dir = f'{BASEPATH}/results/safe_gpt/trained/safe/{frag_method}/beam/'
-        
-    elif model_ver == 'pretrained':
-        model_path = f'{BASEPATH}/models/safe_gpt/pretrained/'
-        output_dir = f'{BASEPATH}/results/safe_gpt/pretrained/safe/{frag_method}/beam/'
+    if model_ver == 'pretrained':
+        model_path = f'{BASEPATH}/models/safe/gpt/pretrained/'
+        output_dir = f'{BASEPATH}/results/safe/gpt/pretrained/{frag_method}/beam/'
+
+    else:  # finetuning / from_scratch
+        model_path = f'{BASEPATH}/models/safe/gpt/{model_ver}/{frag_method}/best_model'
+        output_dir = f'{BASEPATH}/results/safe/gpt/{model_ver}/{frag_method}/beam/'
     
     # Molecule generation using beam-search
     cmd = [

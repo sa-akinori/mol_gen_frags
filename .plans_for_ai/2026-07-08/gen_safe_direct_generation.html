@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Plan: gen_safe.py 学習済みモデルからの直接生成 + RDKit 判定 (2026-07-08)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; }
+  h1 { border-bottom: 2px solid #333; }
+  .step { margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+  pre { background: #f4f4f4; padding: 1em; border-radius: 4px; overflow-x: auto; }
+  table { border-collapse: collapse; } td, th { border: 1px solid #ccc; padding: 0.3em 0.6em; text-align: left; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plan: gen_safe.py 学習済みモデルからの直接生成 + RDKit 判定</h1>
+  <p class="meta">Date: 2026-07-08 | Status: pending-approval</p>
+</header>
+
+<section id="overview">
+  <h2>概要</h2>
+  <p>test split のフラグメント(<code>pass_safe</code>)をプレフィックスとして学習済み SAFE モデルの
+  <code>model.generate</code> に<strong>直接</strong>与えて分子を生成し、生成物を
+  <strong>RDKit で valid/invalid 判定</strong>する。<code>scaffold_decoration</code>/<code>scaffold_morphing</code>
+  などの高レベル API は使わない。トークナイズ→生成→デコードは <code>SAFEDesign._generate</code>/<code>_decode_safe</code>
+  を参照（末尾 EOS 除去、<code>batch_decode</code>、<code>safe.decode</code> で SAFE→SMILES）。
+  <code>src/func/generation_safe_func.py</code> は変更しない（参照のみ）。</p>
+
+  <h3>確定した設定（ユーザー承認済み）</h3>
+  <table>
+    <tr><th>項目</th><th>値</th></tr>
+    <tr><td>データセット</td><td>data/safe/{slice_name}/normal の test split</td></tr>
+    <tr><td>生成入力（プレフィックス）</td><td>各行の pass_safe（フラグメントの SAFE 文字列）</td></tr>
+    <tr><td>slice_name / model_ver</td><td>'brics' / 'trained'</td></tr>
+    <tr><td>生成対象件数</td><td>test 先頭 1000 件</td></tr>
+    <tr><td>生成方法</td><td>num_beams=50, num_return_sequences=50, max_length=200, do_sample=False, seed=42</td></tr>
+    <tr><td>妥当性判定</td><td>safe.decode → Chem.MolFromSmiles が None でなければ valid</td></tr>
+    <tr><td>出力</td><td>results/safe_gpt/{model_ver}/safe/{slice_name}/direct/predictions.csv（+ error_logs.csv）</td></tr>
+  </table>
+
+  <h3>生成・判定の流れ（参照: _generate / _decode_safe）</h3>
+  <ol>
+    <li>pass_safe を get_pretrained() トークナイザでトークナイズ</li>
+    <li>末尾 EOS を除去（input_ids[:, :-1]、token_type_ids は除去）</li>
+    <li>model.generate(num_beams=50, num_return_sequences=50, max_length=200)</li>
+    <li>batch_decode(skip_special_tokens=True) で SAFE 文字列を取得</li>
+    <li>safe.decode(fix=True, canonical=True, ignore_errors=True, remove_dummies=True) で SMILES 化</li>
+    <li>Chem.MolFromSmiles で判定。valid なら canonical SMILES、invalid なら 'invalid'</li>
+  </ol>
+</section>
+
+<section id="plan">
+  <h2>実装計画</h2>
+  <ol>
+    <article class="step" data-step="1">
+      <li>
+        <h3>Step 1: import の整理</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_safe.py</code>（冒頭）</p>
+        <p><strong>変更内容:</strong> de novo 用の暫定 import を置き換える。標準
+        <code>os, subprocess, itertools, signal</code>；サードパーティ
+        <code>torch, pandas as pd, datasets, tqdm, import safe, SAFETokenizer,
+        SAFEDoubleHeadsModel, from rdkit import Chem</code>；ローカル
+        <code>from func.utility import set_seed</code>。<code>SAFEDesign</code> は不要なので import しない。</p>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+    <article class="step" data-step="2">
+      <li>
+        <h3>Step 2: timeout_handler・生成ヘルパ・生成関数を実装（de novo 関数を置き換え）</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_safe.py</code>（<code>__main__</code> の上）</p>
+        <p><strong>変更内容:</strong> 暫定 <code>generate_de_novo</code> を削除し、
+        <code>timeout_handler</code>、private ヘルパ <code>_generate_valid_smiles</code>
+        （プレフィックス1件を直接生成し RDKit 判定）、公開関数 <code>generate_from_model</code>
+        （test を反復し predictions.csv / error_logs.csv を出力、妥当率を print）を実装する。
+        型ヒント・Google style docstring・カラム名明記。</p>
+        <pre><code>def _generate_valid_smiles(model, tokenizer, prefix, n_samples,
+        num_beams, max_length, device) -> list[str]:
+    enc = tokenizer(prefix, return_tensors="pt")
+    enc.pop("token_type_ids", None)
+    model_inputs = {k: v[:, :-1].to(device) for k, v in enc.items()}  # EOS除去
+    outputs = model.generate(**model_inputs, num_beams=num_beams,
+        num_return_sequences=n_samples, max_length=max_length,
+        do_sample=False, early_stopping=True)
+    safe_seqs = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+    out = []
+    for seq in safe_seqs:
+        smi = safe.decode(seq, as_mol=False, fix=True, canonical=True,
+            ignore_errors=True, remove_dummies=True, remove_added_hs=True)
+        mol = Chem.MolFromSmiles(smi) if smi else None
+        out.append(Chem.MolToSmiles(mol) if mol is not None else "invalid")
+    return out
+
+def generate_from_model(model_path, dataset_dir, output_dir,
+        n_generate=1000, n_samples=50, num_beams=50, max_length=200,
+        timeout_sec=60, random_seed=42) -> pd.DataFrame:
+    # load model + get_pretrained tokenizer -> cuda/eval
+    # test = datasets.load_from_disk(dataset_dir)["test"]
+    # for first n_generate rows: prefix = row["pass_safe"]
+    #   set_seed; 60s timeout; _generate_valid_smiles(...)
+    #   n_valid = count(valid); append row
+    # columns: target, full_safe, pass_safe, fragment, n_valid, prediction_1..N
+    # save predictions.csv / error_logs.csv; print validity %; return df</code></pre>
+        <p><strong>依存関係:</strong> Step 1 の後</p>
+      </li>
+    </article>
+    <article class="step" data-step="3">
+      <li>
+        <h3>Step 3: __main__ の修正（slice 名変更 + gen_method 分岐）</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_safe.py</code>（<code>__main__</code>）</p>
+        <p><strong>変更内容:</strong> <code>slice_name='brics'</code>、<code>model_ver='trained'</code> 新設；
+        <code>model_path</code> を <code>.../{model_ver}/safe/{slice_name}/best_model</code>、
+        <code>dataset_dir</code> を <code>data/safe/{slice_name}/normal</code> に更新。
+        <code>gen_method</code> 既定 <code>'direct'</code> で分岐:
+        <code>'direct'</code>→<code>generate_from_model(...)</code>（出力 <code>.../direct/</code>）、
+        <code>else</code>→既存 subprocess+concat を移動（<code>pretrained</code>→<code>model_ver</code> のみ置換）。
+        末尾の暫定 de novo 呼び出しは削除。コメントアウト済みスイープは残す。</p>
+        <p><strong>依存関係:</strong> Step 2 の後</p>
+      </li>
+    </article>
+  </ol>
+</section>
+</body>
+</html>

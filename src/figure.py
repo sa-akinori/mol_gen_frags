@@ -13,6 +13,8 @@ import ast
 from rdkit import Chem
 from rdkit.Chem import Descriptors
 from collections import Counter
+from wandb.sdk.internal import datastore
+from wandb.proto import wandb_internal_pb2 as wandb_pb
 
 xlims = {
     'MW': [0, 1000],
@@ -77,6 +79,89 @@ def frag_num_analyze(
     fragment:str
     )->tuple[int, int]:
     return len(fragment.split('.')), 0
+
+
+def read_wandb_loss_history(
+    run_path:str
+    )->pd.DataFrame:
+    """Extract loss history from a wandb offline run binary file.
+
+    Scans the wandb datastore records of a ``run-*.wandb`` file and collects
+    the ``history`` records that hold the training/evaluation losses.
+
+    Args:
+        run_path: Absolute path to the ``run-*.wandb`` binary file.
+
+    Returns:
+        A DataFrame sorted in ascending order of ``step`` with columns:
+            - ``step`` (int): value of ``train/global_step``.
+            - ``train_loss`` (float): value of ``train/loss`` (NaN if absent).
+            - ``eval_loss`` (float): value of ``eval/loss`` (NaN if absent).
+    """
+    ds = datastore.DataStore()
+    ds.open_for_scan(run_path)
+
+    records = []
+    while True:
+        data = ds.scan_data()
+        if data is None:
+            break
+        record = wandb_pb.Record()
+        record.ParseFromString(data)
+        if record.WhichOneof("record_type") != "history":
+            continue
+
+        values = {}
+        for item in record.history.item:
+            key = item.key or "/".join(item.nested_key)
+            try:
+                values[key] = float(item.value_json)
+            except (ValueError, TypeError):
+                continue
+
+        if "train/global_step" not in values:
+            continue
+
+        records.append({
+            "step": int(values["train/global_step"]),
+            "train_loss": values.get("train/loss", np.nan),
+            "eval_loss": values.get("eval/loss", np.nan),
+            })
+
+    return pd.DataFrame(records, columns=["step", "train_loss", "eval_loss"]).sort_values("step").reset_index(drop=True)
+
+
+def plot_learning_curve(
+    history:pd.DataFrame,
+    save_path:str,
+    title:str
+    )->None:
+    """Plot and save a train/eval loss learning curve.
+
+    Draws ``train_loss`` and ``eval_loss`` against ``step`` as two line plots
+    on a single figure, saving the result to ``save_path``.
+
+    Args:
+        history: DataFrame with columns ``step``, ``train_loss`` and
+            ``eval_loss`` (as returned by :func:`read_wandb_loss_history`).
+        save_path: Absolute path of the PNG file to write.
+        title: Figure title.
+    """
+    train = history[["step", "train_loss"]].dropna()
+    eval_ = history[["step", "eval_loss"]].dropna()
+
+    plt.figure()
+    plt.plot(train["step"], train["train_loss"], label="train_loss", linestyle="-")
+    if not eval_.empty:
+        plt.plot(eval_["step"], eval_["eval_loss"], label="eval_loss", linestyle="--")
+    plt.xlabel("Steps")
+    plt.ylabel("Loss")
+    plt.title(title)
+    plt.legend()
+
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    plt.savefig(save_path)
+    plt.close()
 
 
 if __name__ == "__main__":
@@ -202,7 +287,7 @@ if __name__ == "__main__":
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
             create_boxplot(df=curated_df, x_col=col_name, y_col=metric, x_name=col_name, y_name=metric_name, x_lim=x_lim, y_lim=y_lim, hue=hue_name, save_path=save_path)
             
-    if 1:
+    if 0:
         # For constrained data set
         # Setting
         const_name = 'attach_point_num' # ['attach_point_num', 'dup_frags', 'frag_num']
@@ -281,3 +366,20 @@ if __name__ == "__main__":
             create_scatter_plot(df=curated_df, x_col='n_fragments', y_col=y_col, output_path=f'{fd}/figures/frag_feat_vs_prop/{arc_name}/{model_name}/{str_name}/{slice_method}/{gen_method}/normal/n_fragments/{y_col}.png', show_corr=False, add_diagonal=False)
             create_scatter_plot(df=curated_df, x_col='n_wildcards', y_col=y_col, output_path=f'{fd}/figures/frag_feat_vs_prop/{arc_name}/{model_name}/{str_name}/{slice_method}/{gen_method}/normal/n_wildcards/{y_col}.png', show_corr=False, add_diagonal=False)
             create_scatter_plot(df=curated_df, x_col='n_wildcards', y_col=y_col, output_path=f'{fd}/figures/frag_feat_vs_prop/{arc_name}/{model_name}/{str_name}/{slice_method}/{gen_method}/normal/n_dup_frags/{y_col}.png', show_corr=False, add_diagonal=False)
+
+    if 1:
+        # Pretraining learning curves (train/eval loss vs steps) from wandb offline runs
+        out_dir = f'{fd}/figures/learning_curves'
+        run_dirs = {
+            'rffmg_t5_trained_brics':       'wandb/offline-run-20250907_114610-c54mbj4m',
+            'rffmg_t5_trained_rc_cms':      'wandb/offline-run-20250903_155930-1bb137m9',
+            'rffmg_t5_from_scratch_brics':  'wandb/offline-run-20250925_104927-gf6oysoc',
+            'rffmg_t5_from_scratch_rc_cms': 'wandb/offline-run-20250925_104947-sa7dxu6r',
+            'safe_gpt_brics':               'wandb/offline-run-20250920_111843-lxs32jiy',
+            'safe_gpt_rc_cms':              'wandb/offline-run-20250913_185038-i0hyt8qz',
+            }
+
+        for name, run_dir in run_dirs.items():
+            run_file = glob(f'{fd}/{run_dir}/run-*.wandb')[0]
+            hist = read_wandb_loss_history(run_file)
+            plot_learning_curve(hist, f'{out_dir}/{name}.png', title=name)

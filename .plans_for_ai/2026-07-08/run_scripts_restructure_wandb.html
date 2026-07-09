@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Plan: 学習出力の新レイアウト移行 + wandb 識別保存 (2026-07-08)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; }
+  h1 { border-bottom: 2px solid #333; }
+  .step { margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+  table { border-collapse: collapse; }
+  th, td { border: 1px solid #ccc; padding: 0.3em 0.6em; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plan: 学習スクリプトの出力構造を新レイアウトに移行し、wandb を識別可能に保存</h1>
+  <p class="meta">Date: 2026-07-08 | Status: pending-approval</p>
+</header>
+
+<section id="overview">
+  <h2>概要</h2>
+  <p>学習の保存先を新レイアウト <code>models/{gpt|t5chem}/{safe|rffmg}/{mode}/{slice}/</code> に移行し、
+  wandb の run を「どのモデル/表現/モード/slice か」で識別・フィルタできるようにする。
+  MODE の値も dir 名と揃え <code>finetuning</code> / <code>from_scratch</code> に統一（従来の <code>finetune</code> から改名）。</p>
+  <table>
+    <tr><th>model</th><th>repr</th><th>mode</th><th>出力先</th></tr>
+    <tr><td>gpt</td><td>safe</td><td>finetuning</td><td>models/gpt/safe/finetuning/${FRAG_NAME}/</td></tr>
+    <tr><td>gpt</td><td>safe</td><td>from_scratch</td><td>models/gpt/safe/from_scratch/${FRAG_NAME}/</td></tr>
+    <tr><td>t5chem</td><td>rffmg</td><td>finetuning</td><td>models/t5chem/rffmg/finetuning/${FRAG_NAME}/</td></tr>
+    <tr><td>t5chem</td><td>rffmg</td><td>from_scratch</td><td>models/t5chem/rffmg/from_scratch/${FRAG_NAME}/</td></tr>
+  </table>
+  <p>pretrained ソースは本タスクでは移動せず、<code>models/safe_gpt/pretrained</code> /
+  <code>models/t5chem/pretrained</code> をそのまま参照（実ファイル移動・生成側パス更新は別途）。</p>
+  <h3>wandb マッピング</h3>
+  <table>
+    <tr><th>項目</th><th>safe (gpt)</th><th>t5chem</th></tr>
+    <tr><td>project</td><td>gpt_safe（--wandb_project）</td><td>t5chem_rffmg（env + パッケージ setdefault 化）</td></tr>
+    <tr><td>識別名</td><td>WANDB_RUN_GROUP=${MODE}_${FRAG_NAME}（run名は uuid 固定のため group）</td><td>--run_name "${MODE}_${FRAG_NAME}"</td></tr>
+    <tr><td>tags</td><td>gpt,safe,${MODE},${FRAG_NAME}</td><td>t5chem,rffmg,${MODE},${FRAG_NAME}</td></tr>
+  </table>
+</section>
+
+<section id="plan">
+  <h2>実装計画</h2>
+  <ol>
+    <article class="step" data-step="1">
+      <li>
+        <h3>Step 1: run_safe.sh を新構造 + wandb 対応に更新</h3>
+        <p><strong>対象ファイル:</strong> <code>src/train_model/run_safe.sh</code></p>
+        <p><strong>変更内容:</strong> <code>MODE</code> を <code>finetuning</code>/<code>from_scratch</code> に改名。
+          <code>OUTPUT_DIR</code> を <code>models/gpt/safe/{mode}/${FRAG_NAME}/</code> に。
+          <code>PRETRAINED_DIR="models/safe_gpt/pretrained"</code> は据え置き。
+          分岐後に <code>export WANDB_RUN_GROUP="${MODE}_${FRAG_NAME}"</code> と
+          <code>export WANDB_TAGS="gpt,safe,${MODE},${FRAG_NAME}"</code> を追加。
+          <code>safe-train</code> に <code>--wandb_project gpt_safe</code> を追加。他は現状維持。</p>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+    <article class="step" data-step="2">
+      <li>
+        <h3>Step 2: run_t5chem.sh を新構造 + wandb 対応に更新</h3>
+        <p><strong>対象ファイル:</strong> <code>src/train_model/run_t5chem.sh</code></p>
+        <p><strong>変更内容:</strong> <code>MODE</code> を <code>finetuning</code>/<code>from_scratch</code> に改名。
+          <code>OUTPUT_DIR</code> を <code>models/t5chem/rffmg/{mode}/${FRAG_NAME}</code> に。
+          分岐後に <code>export WANDB_PROJECT="t5chem_rffmg"</code> と
+          <code>export WANDB_TAGS="t5chem,rffmg,${MODE},${FRAG_NAME}"</code> を追加。
+          <code>t5chem train</code> に <code>--run_name "${MODE}_${FRAG_NAME}"</code> を追加。他は現状維持。</p>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+    <article class="step" data-step="3">
+      <li>
+        <h3>Step 3: t5chem run_trainer.py（site-packages）を wandb 有効化 + project を env 尊重に</h3>
+        <p><strong>対象ファイル:</strong>
+          <code>/home/sato/miniconda3/envs/t5chem/lib/python3.12/site-packages/t5chem/run_trainer.py</code></p>
+        <p><strong>変更内容:</strong>
+          114行目 <code>os.environ["WANDB_PROJECT"]="T5Chem"</code> →
+          <code>os.environ.setdefault("WANDB_PROJECT", "T5Chem")</code>。
+          265行目 <code>report_to="none",</code> → <code>report_to="wandb",</code>。</p>
+        <p><strong>依存関係:</strong> Step 2 の後</p>
+        <p><strong>注意:</strong> site-packages（リポジトリ外）の編集で t5chem 再インストール時に失われる。
+          README_ja への手順追記を推奨（本計画では任意）。</p>
+      </li>
+    </article>
+  </ol>
+</section>
+
+<section id="notes">
+  <h2>確認事項</h2>
+  <ul>
+    <li>既定は両スクリプトとも <code>MODE="finetuning"</code>, <code>FRAG_NAME="rc_cms"</code>。</li>
+    <li>pretrained ソースは旧パスのまま。出力のみ新構造。生成側スクリプトの新パス対応は本計画外。</li>
+    <li>既存モデルディレクトリの物理移動は本計画外（別途）。</li>
+    <li>safe-train は run 名を <code>safe-model-&lt;uuid&gt;</code> で固定するため、safe の識別は project+group+tags+config に依存。</li>
+  </ul>
+</section>
+</body>
+</html>

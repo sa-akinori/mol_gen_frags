@@ -12,8 +12,8 @@ if __name__=='__main__':
     # Model parameters
     parser.add_argument('--frag_method', type=str, default='rc_cms', choices=['rc_cms', 'brics'],
                         help='Dataset slice name (default: rc_cms)')
-    parser.add_argument('--model_ver', type=str, default='trained', choices=['trained', 'pretrained'],
-                        help='Model version (default: trained)')
+    parser.add_argument('--model_ver', type=str, default='finetuning', choices=['finetuning', 'from_scratch', 'pretrained'],
+                        help='Model version (default: finetuning)')
     
     # Generation parameters
     parser.add_argument('--additional_path', type=str, default='normal', choices=['normal', 'dup_frags', 'frag_num', 'frag_order', 'attach_point_num'],
@@ -34,8 +34,8 @@ if __name__=='__main__':
     frag_method = args.frag_method
     model_name = args.model_ver
     additional_path = args.additional_path
-    model_path  = f'{BASEPATH}/models/t5chem/{model_name}/rffmg/{frag_method}/best_model/'
-    output_dir  = f'{BASEPATH}/results/t5chem/{model_name}/rffmg/{frag_method}/{gen_method}/{additional_path}'
+    model_path  = f'{BASEPATH}/models/rffmg/t5chem/{model_name}/{frag_method}/best_model/'
+    output_dir  = f'{BASEPATH}/results/rffmg/t5chem/{model_name}/{frag_method}/{gen_method}/{additional_path}'
     dataset_dir = f'{BASEPATH}/data/rffmg/{frag_method}/{additional_path}/'
     os.makedirs(output_dir, exist_ok=True)
         

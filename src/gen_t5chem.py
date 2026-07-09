@@ -9,8 +9,8 @@ if __name__=='__main__':
     fd = os.path.dirname(os.path.dirname(__file__))
     gen_method = 'beam'
     slice_name = 'our_slice'
-    output_dir = f'{fd}/results/t5chem/trained/dummy/{slice_name}/{gen_method}/'
-    model_path = f'{fd}/models/t5chem/trained/dummy/{slice_name}/best_model/'
+    output_dir = f'{fd}/results/rffmg/t5chem/finetuning/dummy/{slice_name}/{gen_method}/'
+    model_path = f'{fd}/models/rffmg/t5chem/finetuning/dummy/{slice_name}/best_model/'
     dataset_dir = f'{fd}/data/dummy/{slice_name}/'
     
     optim = False
