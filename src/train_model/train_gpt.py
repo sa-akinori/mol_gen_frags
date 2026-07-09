@@ -17,19 +17,7 @@ from pathlib import Path
 
 import torch
 from torch.utils.data import Dataset
-from transformers import (
-    AutoTokenizer,
-    GPT2Config,
-    GPT2LMHeadModel,
-    PreTrainedTokenizerBase,
-    Trainer,
-    TrainingArguments,
-    set_seed,
-)
-
-PRETRAIN_DEFAULT = "entropy/gpt2_zinc_87m"
-SEPARATOR = ">>"
-
+from transformers import AutoTokenizer, GPT2Config, GPT2LMHeadModel, PreTrainedTokenizerBase, Trainer, TrainingArguments, set_seed
 
 def read_lines(path: Path) -> list[str]:
     """Read a newline-separated text file into a list of stripped lines.
@@ -63,7 +51,7 @@ class RFFMGDataset(Dataset):
         eos_id = tokenizer.eos_token_id
         self.examples: list[dict[str, list[int]]] = []
         for source, target in zip(sources, targets):
-            prompt_ids = tokenizer(source + SEPARATOR, add_special_tokens=False)["input_ids"]
+            prompt_ids = tokenizer(source + ">>", add_special_tokens=False)["input_ids"]
             target_ids = tokenizer(target, add_special_tokens=False)["input_ids"]
             input_ids = ([bos_id] + prompt_ids + target_ids + [eos_id])[:max_length]
             labels = ([-100] * (1 + len(prompt_ids)) + target_ids + [eos_id])[:max_length]
@@ -109,8 +97,8 @@ def parse_args() -> argparse.Namespace:
                         help="Fragmentation method (default: rc_cms)")
     parser.add_argument("--mode", type=str, default="finetuning", choices=["finetuning", "from_scratch"],
                         help="Training mode (default: finetuning)")
-    parser.add_argument("--pretrain", type=str, default=PRETRAIN_DEFAULT,
-                        help=f"Pretrained model/tokenizer id (default: {PRETRAIN_DEFAULT})")
+    parser.add_argument("--pretrain", type=str, default="entropy/gpt2_zinc_87m",
+                        help=f"Pretrained model/tokenizer id (default: entropy/gpt2_zinc_87m)")
     parser.add_argument("--data_dir", type=str, required=True,
                         help="Directory containing train/val .source/.target files")
     parser.add_argument("--output_dir", type=str, required=True,
@@ -135,8 +123,8 @@ def parse_args() -> argparse.Namespace:
                         help="Random seed (default: 42)")
     return parser.parse_args()
 
+if __name__ == "__main__":
 
-def main() -> None:
     args = parse_args()
 
     # Run wandb offline unless explicitly overridden by the environment.
@@ -162,18 +150,8 @@ def main() -> None:
 
     # Datasets.
     data_dir = Path(args.data_dir)
-    train_dataset = RFFMGDataset(
-        read_lines(data_dir / "train.source"),
-        read_lines(data_dir / "train.target"),
-        tokenizer,
-        args.max_length,
-    )
-    val_dataset = RFFMGDataset(
-        read_lines(data_dir / "val.source"),
-        read_lines(data_dir / "val.target"),
-        tokenizer,
-        args.max_length,
-    )
+    train_dataset = RFFMGDataset(sources=read_lines(data_dir / "train.source"), targets=read_lines(data_dir / "train.target"), tokenizer=tokenizer, max_length=args.max_length)
+    val_dataset   = RFFMGDataset(sources=read_lines(data_dir / "val.source"),   targets=read_lines(data_dir / "val.target"),   tokenizer=tokenizer, max_length=args.max_length)
 
     training_args = TrainingArguments(
         output_dir=args.output_dir,
@@ -204,7 +182,3 @@ def main() -> None:
     best_model_dir = f"{args.output_dir}/best_model"
     trainer.save_model(best_model_dir)
     tokenizer.save_pretrained(best_model_dir)
-
-
-if __name__ == "__main__":
-    main()
