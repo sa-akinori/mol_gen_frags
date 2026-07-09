@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Plan: RFFMG-GPT バックエンド追加 (2026-07-09)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; }
+  h1 { border-bottom: 2px solid #333; }
+  .step { margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+  ul.decisions li { margin: 0.2em 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plan: RFFMG-GPT バックエンド追加</h1>
+  <p class="meta">Date: 2026-07-09 | Status: approved</p>
+</header>
+
+<section id="overview">
+  <h2>概要</h2>
+  <p>RFFMG のフラグメント表現（<code>フラグメント &gt;&gt; 分子</code> の source→target）を、既存の T5Chem に加えて
+  <strong>GPT2 系デコーダ専用モデル</strong>でも学習・生成・評価できるようにする。事前学習済み
+  <code>entropy/gpt2_zinc_87m</code>（GPT2, 12層/768/約87M, vocab 2707, n_positions 256）を利用し、
+  SAFE-GPT(88.8M) と等容量での比較を可能にする。T5Chem と並ぶ <code>MODEL_NAME=gpt</code> バックエンドとして追加する。</p>
+  <h3>確定した決定事項</h3>
+  <ul class="decisions">
+    <li><strong>学習モード</strong>: finetuning（ZINC 重み初期化）+ from_scratch（ZINC と同一 config・同一トークナイザ、重み random）の両対応</li>
+    <li><strong>区切り</strong>: <code>&gt;&gt;</code>（元の sentence 形式そのまま）</li>
+    <li><strong>スコープ</strong>: 学習・生成・評価までのフルパイプライン</li>
+    <li><strong>生成スクリプトの統合</strong>: <code>gen_t5chem.{py,sh}</code> を <code>gen_rffmg.{py,sh}</code> にリネームし <code>--model_name {t5chem,gpt}</code> で分岐。GPT2 生成本体は <code>src/func/generation_rffmg_func.py</code></li>
+    <li><strong>HP</strong>: run_safe.sh 準拠、LR=1e-4 統一（両モード）、50 epoch、warmup 10000、batch 32、eval/save 5000 step、save_total_limit 5、load_best_model_at_end、wandb offline、seed 固定</li>
+    <li><strong>実行環境</strong>: 既存 t5chem env を流用（transformers 4.45.2 / torch 2.10）。<strong>t5chem パッケージは変更しない</strong></li>
+  </ul>
+  <h3>データ表現（デコーダ専用化）</h3>
+  <ul>
+    <li>学習系列: <code>&lt;bos&gt;</code> + <code>source + "&gt;&gt;" + target</code> + <code>&lt;eos&gt;</code></li>
+    <li>labels: プロンプト部（<code>&lt;bos&gt;source&gt;&gt;</code>）を -100 マスクし target 部のみ loss（p(target|source)）</li>
+    <li>生成プロンプト: <code>&lt;bos&gt;</code> + <code>source + "&gt;&gt;"</code> → 続きを生成し <code>&gt;&gt;</code> 以降・eos までを予測分子とする</li>
+    <li>最大長: 256（n_positions）。train と gen で formatting を厳密一致させる</li>
+  </ul>
+</section>
+
+<section id="plan">
+  <h2>実装計画</h2>
+  <ol>
+    <article class="step" data-step="1">
+      <li>
+        <h3>Step 1: GPT2 学習スクリプト新規作成</h3>
+        <p><strong>対象ファイル:</strong> <code>src/train_model/train_gpt.py</code>（新規）</p>
+        <p><strong>変更内容:</strong> argparse（<code>--frag_method</code>, <code>--mode {finetuning,from_scratch}</code>, <code>--pretrain</code>(既定 <code>entropy/gpt2_zinc_87m</code>), <code>--data_dir</code>, <code>--output_dir</code> 等）。トークナイザは ZINC の <code>AutoTokenizer</code> を両モード共通で使用。finetuning=<code>GPT2LMHeadModel.from_pretrained</code> / from_scratch=<code>GPT2LMHeadModel(GPT2Config(ZINC 同一))</code>。<code>normal/{train,val}.{source,target}</code> から <code>source+"&gt;&gt;"+target</code> を作り tokenize（bos/eos 付与, max_length=256）、labels のプロンプト部を -100 マスク。<code>Trainer</code>+<code>TrainingArguments</code> を run_safe.sh 準拠に設定、seed 固定、<code>best_model</code> 保存。</p>
+        <p><strong>依存関係:</strong> なし（既存 <code>.source/.target</code> を利用、make_datasets 変更不要）</p>
+      </li>
+    </article>
+    <article class="step" data-step="2">
+      <li>
+        <h3>Step 2: 学習ラッパー .sh の MODEL_NAME 分岐</h3>
+        <p><strong>対象ファイル:</strong> <code>src/train_model/run_rffmg.sh</code>（改修）</p>
+        <p><strong>変更内容:</strong> <code>MODEL_NAME</code> を <code>t5chem|gpt</code> で分岐。gpt は <code>python src/train_model/train_gpt.py --mode $MODE --output_dir models/rffmg/gpt/${MODE}/${FRAG_NAME}</code> を実行し、wandb dir を <code>wandb/rffmg/gpt/${MODE}/${FRAG_NAME}</code> に。既存 t5chem 分岐は温存。</p>
+        <p><strong>依存関係:</strong> Step 1 の後</p>
+      </li>
+    </article>
+    <article class="step" data-step="3">
+      <li>
+        <h3>Step 3: GPT2 生成本体を func/ に新規作成</h3>
+        <p><strong>対象ファイル:</strong> <code>src/func/generation_rffmg_func.py</code>（新規、<code>generation_safe_func.py</code> と同じ subprocess パターン）</p>
+        <p><strong>変更内容:</strong> argparse（<code>--model_path</code>, <code>--dataset_file</code>(test.source), <code>--target_file</code>(test.target), <code>--output_dir</code>, <code>--n_samples</code>, <code>--max_length</code>(既定 256), <code>--num_beams</code>, <code>--batch_size</code>, <code>--random_seed</code>）。モデル/トークナイザをロードし、各 source を <code>&lt;bos&gt;source&gt;&gt;</code> にして beam search（num_return_sequences=n_samples）、<code>&gt;&gt;</code> 以降・eos までを予測分子として抽出。<strong>predictions.csv を T5Chem と同一列</strong>（<code>target</code>, <code>prediction_1..N</code>）で書き出し。</p>
+        <p><strong>依存関係:</strong> Step 1 の後</p>
+      </li>
+    </article>
+    <article class="step" data-step="4">
+      <li>
+        <h3>Step 4: 生成ラッパーを gen_rffmg に統合（リネーム + model_name 分岐）</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_mols/gen_t5chem.py → gen_rffmg.py</code>、<code>gen_t5chem.sh → gen_rffmg.sh</code>（リネーム+改修）</p>
+        <p><strong>変更内容:</strong> <code>--model_name {t5chem,gpt}</code>（既定 t5chem）を追加。model_path=<code>models/rffmg/{model_name}/{model_ver}/{frag}/best_model</code>、出力=<code>results/rffmg/{model_name}/{model_ver}/{frag}/beam/{additional_path}/predictions.csv</code>。t5chem → 既存 <code>t5chem predict</code>／gpt → <code>python src/func/generation_rffmg_func.py</code>。gen_rffmg.sh に <code>MODEL_NAME</code> 変数を追加。</p>
+        <p><strong>依存関係:</strong> Step 3 の後</p>
+      </li>
+    </article>
+    <article class="step" data-step="5">
+      <li>
+        <h3>Step 5: 評価スクリプトの GPT 対応</h3>
+        <p><strong>対象ファイル:</strong> <code>src/evaluation.py</code>（改修）</p>
+        <p><strong>変更内容:</strong> <code>--model_name</code> に <code>gpt</code> を追加。<code>str_name</code>/<code>model_dir</code> の 2 値分岐を 3 値化（gpt → <code>str_name='rffmg'</code>, <code>model_dir='gpt'</code>, 入力は <code>test.source</code>）。<code>loadTrainSmiles</code>/<code>loadGenSmiles</code> へは <code>arc_name='t5chem'</code> 相当を渡し既存分岐を再利用（<code>evaluation_func.py</code> は無改修）。</p>
+        <p><strong>依存関係:</strong> Step 4 の後</p>
+      </li>
+    </article>
+    <article class="step" data-step="6">
+      <li>
+        <h3>Step 6: 作図スクリプトの GPT 対応</h3>
+        <p><strong>対象ファイル:</strong> <code>src/figure.py</code>（改修）</p>
+        <p><strong>変更内容:</strong> <code>arc_name</code>（現状 <code>'t5chem'</code> ハードコード）に rffmg+gpt を扱えるようパス生成を対応（<code>results/rffmg/gpt/...</code>・<code>figures/.../rffmg/gpt/...</code>）。</p>
+        <p><strong>依存関係:</strong> Step 5 の後</p>
+      </li>
+    </article>
+    <article class="step" data-step="7">
+      <li>
+        <h3>Step 7: 動作確認（debug スモーク）+ ドキュメント更新</h3>
+        <p><strong>対象ファイル:</strong> <code>README.md</code> / <code>README_ja.md</code> / <code>.claude/structure.md</code>（改修）</p>
+        <p><strong>変更内容:</strong> <code>normal/debug</code> の少量データで train_gpt.py → gen_rffmg.py(gpt) → evaluation.py を 1 回通し、パス・CSV 形式・系列長(256 内)を確認。README/structure に GPT バックエンドと gen_rffmg リネームを追記。</p>
+        <p><strong>依存関係:</strong> Step 6 の後</p>
+      </li>
+    </article>
+  </ol>
+</section>
+
+<section id="no-change">
+  <h2>変更しないもの（再利用）</h2>
+  <ul>
+    <li><code>src/make_datasets.py</code>（既存 <code>.source/.target</code> を利用）</li>
+    <li><code>src/func/evaluation_func.py</code>（t5chem 分岐を再利用）</li>
+    <li><code>src/gen_frags/rffmg_frags.py</code>（表現は共通）</li>
+    <li><code>site-packages/t5chem</code>（パッケージ改変なし）</li>
+    <li><code>requirements/*</code>（新規パッケージ追加なし）</li>
+  </ul>
+</section>
+
+<section id="risks">
+  <h2>リスク / 留意</h2>
+  <ul>
+    <li>n_positions=256: normal データは concat max 217 で収まる。将来の長い評価スライス生成時は要再確認</li>
+    <li>from_scratch はランダム初期化のため 50 epoch で収束するか要観察（HP 探索はしない方針）</li>
+    <li>生成の formatting（bos / <code>&gt;&gt;</code> / eos）を train と gen で厳密一致させること</li>
+    <li>gen_t5chem → gen_rffmg リネームに伴う参照箇所（README 等）を追随更新</li>
+  </ul>
+</section>
+</body>
+</html>

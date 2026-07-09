@@ -11,8 +11,8 @@ if __name__ =='__main__':
     
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('--model_name', type=str, choices=['t5chem', 'safe_gpt'],
-                        help='Model name (default: t5chem)')
+    parser.add_argument('--model_name', type=str, choices=['t5chem', 'safe_gpt', 'gpt'],
+                        help='Model name: t5chem / safe_gpt / gpt (RFFMG-GPT) (default: t5chem)')
     parser.add_argument('--model_ver', type=str, default='finetuning', choices=['finetuning', 'pretrained', 'from_scratch'],
                         help='Phase name (default: finetuning)')
     parser.add_argument('--frag_method', type=str, default='rc_cms', choices=['rc_cms', 'brics'],
@@ -23,8 +23,14 @@ if __name__ =='__main__':
     
     # Setting
     model_name  = args.model_name
-    str_name    = 'rffmg' if model_name=='t5chem' else 'safe'
-    model_dir   = 't5chem' if model_name=='t5chem' else 'gpt'
+    # RFFMG-GPT (model_name='gpt') keeps its own results path (str_name/model_dir) but
+    # reuses the T5Chem-format reader in evaluation_func (arc_name).
+    if model_name == 'safe_gpt':
+        str_name, model_dir, arc_name = 'safe', 'gpt', 'safe_gpt'
+    elif model_name == 'gpt':
+        str_name, model_dir, arc_name = 'rffmg', 'gpt', 't5chem'
+    else:  # t5chem
+        str_name, model_dir, arc_name = 'rffmg', 't5chem', 't5chem'
     model_ver   = args.model_ver
     frag_method = args.frag_method
     additional_path = args.additional_path
@@ -36,11 +42,11 @@ if __name__ =='__main__':
         testInputfile = None
         additional_path = 'normal'
         
-    elif model_name == 't5chem':
+    else:  # t5chem or gpt (RFFMG fragment representation)
         tr_file_name  = f'{BASEPATH}/data/rffmg/{frag_method}/normal/train.target'
         testInputfile = f'{BASEPATH}/data/rffmg/{frag_method}/{additional_path}/test.source'
-        
-    trsmiles = loadTrainSmiles(model_name, tr_file_name)
+
+    trsmiles = loadTrainSmiles(arc_name, tr_file_name)
     
     # Calculate some basic physic property for training smiles
     if not os.path.isfile(f'{BASEPATH}/results/train_physic_property.csv'):
@@ -57,7 +63,7 @@ if __name__ =='__main__':
     file_name = f'{BASEPATH}/results/{str_name}/{model_dir}/{model_ver}/{frag_method}/beam/{additional_path}/predictions.csv'
     
     # Evaluation gen mols
-    genmols = loadGenSmiles(model_name, file_name, testInputfile)
+    genmols = loadGenSmiles(arc_name, file_name, testInputfile)
     stats, genmols = sc3_check_genmol_results(outfd=outfd, genmols=genmols, trsmiles=trsmiles, skipCreateExcel=False, algorithm_name=frag_method, n_chunks=5)
     stats.to_csv(f'{outfd}/stats.csv')
     

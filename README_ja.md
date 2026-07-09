@@ -128,11 +128,13 @@ $ python src/make_datasets.py --frag_method brics # chose brics or rc_cms
 
 ### モデルの学習
 ```bash
-# 1. t5chemを用いたrffmgモデルの学習
+# 1. rffmgモデルの学習（T5ChemまたはGPT2）
 $ conda activate t5chem
-$ t5chem train --data_dir data/rffmg/rc_cms/normal --output_dir models/rffmg/t5chem/finetuning/rc_cms --pretrain models/rffmg/t5chem/pretrained --task_type product --num_epoch 50
-# rc_cmsの部分、output_dirは適切に変更してください。また、--pretrain '' とすると事前学習済みモデルなしの学習が行われます。
-# 本研究のfrom_scratchモデルは--pretrain ''とした場合の結果です。
+$ bash src/train_model/run_rffmg.sh
+# .shファイル内の MODEL_NAME/MODE/FRAG_NAME を設定してください。
+#   MODEL_NAME="t5chem": T5Chem（`t5chem train` を実行）。
+#   MODEL_NAME="gpt":    GPT2（src/train_model/train_gpt.py）。MODE="finetuning" は entropy/gpt2_zinc_87m を初期値に、
+#                        MODE="from_scratch" は同一configをランダム初期化で学習します。
 
 # 2. safe-gptのファインチューニング
 $ conda activate safe
@@ -144,8 +146,8 @@ $ bash src/train_model/run_safe.sh
 
 ### 分子の生成
 ```bash
-# t5chemモデルを用いた分子生成
-$ bash src/gen_mols/gen_t5chem.sh
+# rffmgモデル（T5ChemまたはGPT2）を用いた分子生成（.sh内のMODEL_NAMEで切替）
+$ bash src/gen_mols/gen_rffmg.sh
 
 # safe-gptモデルを用いた分子生成
 $ bash src/gen_mols/gen_safe.sh
@@ -155,6 +157,7 @@ $ bash src/gen_mols/gen_safe.sh
 ```bash
 $ conda activate safe
 $ python src/evaluation.py --model_name t5chem --model_ver finetuning --frag_method rc_cms --additional_path normal
+# --model_name: t5chem / gpt (RFFMG-GPT) / safe_gpt
 ```
 
 If you need the curated ChEMBL dataset used in this study, please feel free to contact us at [sato.akinori@naist.ac.jp] or [miyao@dsc.naist.jp].

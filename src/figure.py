@@ -168,9 +168,12 @@ if __name__ == "__main__":
     
     # Setting
     fd = os.path.dirname(os.path.dirname(__file__))
-    arc_name     = 't5chem' # ['t5chem', 'safe_gpt']
-    str_name     = 'rffmg' if arc_name=='t5chem' else 'safe'
-    model_name   = 'trained' # ['pretrained', 'trained']
+    arc_name     = 't5chem' # ['t5chem', 'safe_gpt', 'gpt']
+    str_name     = 'safe' if arc_name=='safe_gpt' else 'rffmg'
+    model_dir    = 'gpt' if arc_name in ('safe_gpt', 'gpt') else 't5chem'
+    model_name   = 'trained' # ['pretrained', 'trained', 'finetuning', 'from_scratch']
+    # Results/figures path prefix aligned to evaluation.py output layout: {str_name}/{model_dir}/{model_name}
+    path_prefix  = f'{str_name}/{model_dir}/{model_name}'
     slice_method = 'brics' # ['rc_cms', 'brics']
     gen_method   = 'beam' # ['beam', 'random']
     property_names = ['MW', 'TPSA', 'LogP', 'QED'] # ['MW', 'TPSA', 'LogP', 'QED']
@@ -187,8 +190,8 @@ if __name__ == "__main__":
                 
             else:
                 
-                file_path = f'{fd}/results/{arc_name}/{model_name}/{str_name}/{slice_method}/{gen_method}/normal/physic_property.csv'
-                output_dir = f'{fd}/figures/physic_property/{arc_name}/{model_name}/{str_name}/{slice_method}/{gen_method}/normal'
+                file_path = f'{fd}/results/{path_prefix}/{slice_method}/{gen_method}/normal/physic_property.csv'
+                output_dir = f'{fd}/figures/physic_property/{path_prefix}/{slice_method}/{gen_method}/normal'
                 os.makedirs(output_dir, exist_ok=True)
             
             # Read file in chunks to avoid memory issues
@@ -199,8 +202,8 @@ if __name__ == "__main__":
         
     if 0:
         # Setting
-        pred_path = f'{fd}/results/{arc_name}/{model_name}/{str_name}/{slice_method}/{gen_method}/normal/predictions.csv'
-        prop_path = f'{fd}/results/{arc_name}/{model_name}/{str_name}/{slice_method}/{gen_method}/normal/physic_property.csv'
+        pred_path = f'{fd}/results/{path_prefix}/{slice_method}/{gen_method}/normal/predictions.csv'
+        prop_path = f'{fd}/results/{path_prefix}/{slice_method}/{gen_method}/normal/physic_property.csv'
         n_samples = 5
         
         # Load dataset
@@ -222,7 +225,7 @@ if __name__ == "__main__":
         # ---- Plot ----
         for idx, preds in valid_samples:
             new_prop_df = prop_df.query('SMILES in @preds')
-            output_dir = f'{fd}/figures/physic_property/{arc_name}/{model_name}/{str_name}/{slice_method}/{gen_method}/normal/individual/{idx}'
+            output_dir = f'{fd}/figures/physic_property/{path_prefix}/{slice_method}/{gen_method}/normal/individual/{idx}'
             os.makedirs(output_dir, exist_ok=True)
 
             for prop in property_names:
@@ -232,9 +235,9 @@ if __name__ == "__main__":
     # Extract min/max properties and create scatter plots
     if 0:
         # Setting
-        prop_path = f'{fd}/results/{arc_name}/{model_name}/{str_name}/{slice_method}/{gen_method}/normal/physic_property.csv'
-        cur_path  = f'{fd}/results/{arc_name}/{model_name}/{str_name}/{slice_method}/{gen_method}/normal/curated_data.tsv'
-        output_dir = f'{fd}/figures/physic_property/{arc_name}/{model_name}/{str_name}/{slice_method}/{gen_method}/normal/minmax'
+        prop_path = f'{fd}/results/{path_prefix}/{slice_method}/{gen_method}/normal/physic_property.csv'
+        cur_path  = f'{fd}/results/{path_prefix}/{slice_method}/{gen_method}/normal/curated_data.tsv'
+        output_dir = f'{fd}/figures/physic_property/{path_prefix}/{slice_method}/{gen_method}/normal/minmax'
         
         # Load dataset
         prop_df = pd.read_csv(prop_path, index_col=0)
@@ -257,7 +260,7 @@ if __name__ == "__main__":
         for prop_name in property_names:
             x_col = f'{prop_name}_min'
             y_col = f'{prop_name}_max'
-            output_dir  = f'{fd}/figures/physic_property/{arc_name}/{model_name}/{str_name}/{slice_method}/{gen_method}/normal/minmax'
+            output_dir  = f'{fd}/figures/physic_property/{path_prefix}/{slice_method}/{gen_method}/normal/minmax'
             os.makedirs(output_dir, exist_ok=True)
             create_scatter_plot(df=results_df, x_col=x_col, y_col=y_col, output_path=f'{output_dir}/{prop_name}.png', add_diagonal=False)
     
@@ -276,14 +279,14 @@ if __name__ == "__main__":
             hue_name = None
         
         # Load data sets
-        curated_df = pd.read_csv(f'{fd}/results/{arc_name}/{model_name}/{str_name}/{slice_method}/{gen_method}/normal/curated_data.tsv', sep='\t', index_col=0)
+        curated_df = pd.read_csv(f'{fd}/results/{path_prefix}/{slice_method}/{gen_method}/normal/curated_data.tsv', sep='\t', index_col=0)
         curated_df[[col_name, 'add_frags_num']] = curated_df['fragment'].apply(lambda x: pd.Series(analyze_func(x)))
         
         # Create individual box plots for each metric
         metrics = [('validratio', 'Valid ratio'), ('uniqueratio', 'Unique ratio'), ('novelratio', 'Novel ratio'), ('validfragratio', 'Validfrag ratio')]
         for metric, metric_name in metrics:
             x_lim, y_lim = [min(curated_df[col_name]) - 0.5, max(curated_df[col_name]) + 0.5], [-0.05, 1.05]
-            save_path = f'{fd}/figures/constraints/{arc_name}/{model_name}/{str_name}/{slice_method}/{gen_method}/normal/{metric}.png'
+            save_path = f'{fd}/figures/constraints/{path_prefix}/{slice_method}/{gen_method}/normal/{metric}.png'
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
             create_boxplot(df=curated_df, x_col=col_name, y_col=metric, x_name=col_name, y_name=metric_name, x_lim=x_lim, y_lim=y_lim, hue=hue_name, save_path=save_path)
             
@@ -309,14 +312,14 @@ if __name__ == "__main__":
             hue_name = None
         
         # Load data sets
-        curated_df = pd.read_csv(f'{fd}/results/{arc_name}/{model_name}/{str_name}/{slice_method}/{gen_method}/{const_name}/curated_data.tsv', sep='\t', index_col=0)
+        curated_df = pd.read_csv(f'{fd}/results/{path_prefix}/{slice_method}/{gen_method}/{const_name}/curated_data.tsv', sep='\t', index_col=0)
         curated_df[[col_name, 'add_frags_num']] = curated_df['fragment'].apply(lambda x: pd.Series(analyze_func(x)))
         
         # Create individual box plots for each metric
         metrics = [('validratio', 'Valid ratio'), ('uniqueratio', 'Unique ratio'), ('novelratio', 'Novel ratio'), ('validfragratio', 'Validfrag ratio')]
         for metric, metric_name in metrics:
             x_lim, y_lim = [min(curated_df[col_name]) - 0.5, max(curated_df[col_name]) + 0.5], [-0.05, 1.05]
-            save_path = f'{fd}/figures/constraints/{arc_name}/{model_name}/{str_name}/{slice_method}/{gen_method}/{const_name}/{metric}.png'
+            save_path = f'{fd}/figures/constraints/{path_prefix}/{slice_method}/{gen_method}/{const_name}/{metric}.png'
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
             create_boxplot(df=curated_df, x_col=col_name, y_col=metric, x_name=col_name, y_name=metric_name, x_lim=x_lim, y_lim=y_lim, hue=hue_name, save_path=save_path)
             
@@ -350,7 +353,7 @@ if __name__ == "__main__":
         
     if 0:
         # validratio, uniqueratio, validfragratio, novelratio, SAscores, tanimoto_sim
-        curated_df = pd.read_csv(f'{fd}/results/{arc_name}/{model_name}/{str_name}/{slice_method}/{gen_method}/normal/curated_data.tsv', sep='\t', index_col=0)
+        curated_df = pd.read_csv(f'{fd}/results/{path_prefix}/{slice_method}/{gen_method}/normal/curated_data.tsv', sep='\t', index_col=0)
         
         # Calculate fragment statistics for all data
         curated_df['n_fragments'] = curated_df['fragment'].apply(lambda x: len(x.split('.')))
@@ -360,12 +363,12 @@ if __name__ == "__main__":
         for y_col in ['validratio', 'uniqueratio', 'validfragratio', 'novelratio', 'tanimoto_sim']:
             
             # Plot different combinations
-            os.makedirs(f'{fd}/figures/frag_feat_vs_prop/{arc_name}/{model_name}/{str_name}/{slice_method}/{gen_method}/normal/n_fragments', exist_ok=True)
-            os.makedirs(f'{fd}/figures/frag_feat_vs_prop/{arc_name}/{model_name}/{str_name}/{slice_method}/{gen_method}/normal/n_wildcards', exist_ok=True)
-            os.makedirs(f'{fd}/figures/frag_feat_vs_prop/{arc_name}/{model_name}/{str_name}/{slice_method}/{gen_method}/normal/n_dup_frags', exist_ok=True)
-            create_scatter_plot(df=curated_df, x_col='n_fragments', y_col=y_col, output_path=f'{fd}/figures/frag_feat_vs_prop/{arc_name}/{model_name}/{str_name}/{slice_method}/{gen_method}/normal/n_fragments/{y_col}.png', show_corr=False, add_diagonal=False)
-            create_scatter_plot(df=curated_df, x_col='n_wildcards', y_col=y_col, output_path=f'{fd}/figures/frag_feat_vs_prop/{arc_name}/{model_name}/{str_name}/{slice_method}/{gen_method}/normal/n_wildcards/{y_col}.png', show_corr=False, add_diagonal=False)
-            create_scatter_plot(df=curated_df, x_col='n_wildcards', y_col=y_col, output_path=f'{fd}/figures/frag_feat_vs_prop/{arc_name}/{model_name}/{str_name}/{slice_method}/{gen_method}/normal/n_dup_frags/{y_col}.png', show_corr=False, add_diagonal=False)
+            os.makedirs(f'{fd}/figures/frag_feat_vs_prop/{path_prefix}/{slice_method}/{gen_method}/normal/n_fragments', exist_ok=True)
+            os.makedirs(f'{fd}/figures/frag_feat_vs_prop/{path_prefix}/{slice_method}/{gen_method}/normal/n_wildcards', exist_ok=True)
+            os.makedirs(f'{fd}/figures/frag_feat_vs_prop/{path_prefix}/{slice_method}/{gen_method}/normal/n_dup_frags', exist_ok=True)
+            create_scatter_plot(df=curated_df, x_col='n_fragments', y_col=y_col, output_path=f'{fd}/figures/frag_feat_vs_prop/{path_prefix}/{slice_method}/{gen_method}/normal/n_fragments/{y_col}.png', show_corr=False, add_diagonal=False)
+            create_scatter_plot(df=curated_df, x_col='n_wildcards', y_col=y_col, output_path=f'{fd}/figures/frag_feat_vs_prop/{path_prefix}/{slice_method}/{gen_method}/normal/n_wildcards/{y_col}.png', show_corr=False, add_diagonal=False)
+            create_scatter_plot(df=curated_df, x_col='n_wildcards', y_col=y_col, output_path=f'{fd}/figures/frag_feat_vs_prop/{path_prefix}/{slice_method}/{gen_method}/normal/n_dup_frags/{y_col}.png', show_corr=False, add_diagonal=False)
 
     if 1:
         # Pretraining learning curves (train/eval loss vs steps) from wandb offline runs
