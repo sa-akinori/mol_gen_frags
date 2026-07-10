@@ -36,9 +36,7 @@ elif [ "$MODEL_NAME" = "gpt" ]; then
     # GPT2 (entropy/gpt2_zinc_87m) を素の transformers で学習。finetuning/from_scratch は train_gpt.py が内部で処理。
     python src/train_model/train_gpt.py \
         --frag_method "${FRAG_NAME}" \
-        --mode "${MODE}" \
-        --data_dir "data/rffmg/${FRAG_NAME}/normal" \
-        --output_dir "${OUTPUT_DIR}"
+        --mode "${MODE}"
 
 else
     echo "Unknown MODEL_NAME: ${MODEL_NAME} (use 't5chem' or 'gpt')" >&2
