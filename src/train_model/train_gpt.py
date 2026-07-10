@@ -19,7 +19,7 @@ import torch
 from torch.utils.data import Dataset
 from transformers import AutoTokenizer, EarlyStoppingCallback, GPT2Config, GPT2LMHeadModel, PreTrainedTokenizerBase, Trainer, TrainingArguments
 
-from func.utility import set_seed
+from func.utility import BASEPATH, set_seed
 
 def read_lines(path: Path) -> list[str]:
     """Read a newline-separated text file into a list of stripped lines.
@@ -40,6 +40,9 @@ class RFFMGDataset(Dataset):
     Each item is a dict with keys ``input_ids`` and ``labels`` (both ``list[int]``).
     The prompt part ``<bos> source ">>"`` is masked with ``-100`` in ``labels`` so the
     loss is computed only on the ``target`` tokens and the final ``<eos>``.
+
+    Sequences are not truncated: if any example exceeds ``max_length`` after adding
+    the bos/eos tokens, a ``ValueError`` is raised instead of silently truncating.
     """
 
     def __init__(
@@ -52,11 +55,13 @@ class RFFMGDataset(Dataset):
         bos_id = tokenizer.bos_token_id
         eos_id = tokenizer.eos_token_id
         self.examples: list[dict[str, list[int]]] = []
-        for source, target in zip(sources, targets):
+        for idx, (source, target) in enumerate(zip(sources, targets)):
             prompt_ids = tokenizer(source + ">>", add_special_tokens=False)["input_ids"]
             target_ids = tokenizer(target, add_special_tokens=False)["input_ids"]
-            input_ids = ([bos_id] + prompt_ids + target_ids + [eos_id])[:max_length]
-            labels = ([-100] * (1 + len(prompt_ids)) + target_ids + [eos_id])[:max_length]
+            input_ids = [bos_id] + prompt_ids + target_ids + [eos_id]
+            if len(input_ids) > max_length:
+                raise ValueError(f"Example {idx} has length {len(input_ids)} exceeding max_length {max_length}.")
+            labels = [-100] * (1 + len(prompt_ids)) + target_ids + [eos_id]
             self.examples.append({"input_ids": input_ids, "labels": labels})
 
     def __len__(self) -> int:
@@ -95,16 +100,12 @@ class DataCollatorForCausalLM:
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments for GPT2 RFFMG training."""
     parser = argparse.ArgumentParser(description="Train a GPT2 model for RFFMG generation")
-    parser.add_argument("--frag_method", type=str, default="rc_cms", choices=["brics", "rc_cms"],
-                        help="Fragmentation method (default: rc_cms)")
+    parser.add_argument("--frag_method", type=str, default="brics", choices=["brics", "rc_cms"],
+                        help="Fragmentation method (default: brics)")
     parser.add_argument("--mode", type=str, default="finetuning", choices=["finetuning", "from_scratch"],
                         help="Training mode (default: finetuning)")
     parser.add_argument("--pretrain", type=str, default="entropy/gpt2_zinc_87m",
                         help=f"Pretrained model/tokenizer id (default: entropy/gpt2_zinc_87m)")
-    parser.add_argument("--data_dir", type=str, required=True,
-                        help="Directory containing train/val .source/.target files")
-    parser.add_argument("--output_dir", type=str, required=True,
-                        help="Output directory for checkpoints and the best model")
     parser.add_argument("--num_train_epochs", type=int, default=50,
                         help="Number of training epochs (default: 50)")
     parser.add_argument("--learning_rate", type=float, default=1e-4,
@@ -150,17 +151,21 @@ if __name__ == "__main__":
         model = GPT2LMHeadModel(config)
     model.config.pad_token_id = tokenizer.pad_token_id
 
+    # Data/output locations derived from frag_method and mode.
+    data_dir = Path(f"{BASEPATH}/data/rffmg/{args.frag_method}/normal")
+    output_dir = f"{BASEPATH}/models/rffmg/gpt/{args.mode}/{args.frag_method}"
+
     # Datasets.
-    data_dir = Path(args.data_dir)
     train_dataset = RFFMGDataset(sources=read_lines(data_dir / "train.source"), targets=read_lines(data_dir / "train.target"), tokenizer=tokenizer, max_length=args.max_length)
     val_dataset   = RFFMGDataset(sources=read_lines(data_dir / "val.source"),   targets=read_lines(data_dir / "val.target"),   tokenizer=tokenizer, max_length=args.max_length)
 
     training_args = TrainingArguments(
-        output_dir=args.output_dir,
+        output_dir=output_dir,
         num_train_epochs=args.num_train_epochs,
         learning_rate=args.learning_rate,
         warmup_steps=args.warmup_steps,
         per_device_train_batch_size=args.per_device_train_batch_size,
+        per_device_eval_batch_size=args.per_device_train_batch_size,
         eval_strategy="steps",
         eval_steps=args.eval_steps,
         save_strategy="steps",
@@ -183,6 +188,6 @@ if __name__ == "__main__":
     )
     trainer.train()
 
-    best_model_dir = f"{args.output_dir}/best_model"
+    best_model_dir = f"{output_dir}/best_model"
     trainer.save_model(best_model_dir)
     tokenizer.save_pretrained(best_model_dir)

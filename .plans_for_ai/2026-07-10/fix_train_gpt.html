@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Plan: train_gpt.py の修正 (2026-07-10)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; }
+  h1 { border-bottom: 2px solid #333; }
+  .step { margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plan: train_gpt.py の修正（引数反映・eval設定・max_length検証）</h1>
+  <p class="meta">Date: 2026-07-10 | Status: pending-approval</p>
+</header>
+
+<section id="overview">
+  <h2>概要</h2>
+  <p><code>src/train_model/train_gpt.py</code> に対し、レビューで指摘した3点のバグ修正と max_length の扱い変更を行う。</p>
+  <ul>
+    <li>修正1: <code>--frag_method</code> が未使用で <code>data_dir</code> 既定が <code>brics</code> 固定になっている問題を解消。</li>
+    <li>修正2: <code>--mode</code> が <code>output_dir</code> 既定に反映されず、<code>from_scratch</code> でも <code>finetuning</code> フォルダに保存される問題を解消。</li>
+    <li>修正3: <code>per_device_eval_batch_size</code> 未設定で、ヘルプ記述と実挙動（eval既定8）が食い違う問題を解消。</li>
+    <li>max_length: トークン長が <code>max_length</code> を超えた場合、無言の truncation をやめて <code>ValueError</code> で停止。</li>
+  </ul>
+</section>
+
+<section id="plan">
+  <h2>実装計画</h2>
+  <ol>
+    <article class="step" data-step="1">
+      <li>
+        <h3>Step 1: data_dir / output_dir 引数を削除し frag_method / mode から組み立てる（修正1・修正2）</h3>
+        <p><strong>対象ファイル:</strong> <code>src/train_model/train_gpt.py</code></p>
+        <p><strong>変更内容:</strong> <code>parse_args</code> から <code>--data_dir</code> / <code>--output_dir</code> を削除。<code>__main__</code> 内でローカル変数 <code>data_dir=Path(BASEPATH/data/rffmg/&lt;frag_method&gt;/normal)</code>、<code>output_dir=BASEPATH/models/rffmg/gpt/&lt;mode&gt;/&lt;frag_method&gt;</code> を構築し、既存の <code>args.data_dir</code> / <code>args.output_dir</code> 参照箇所をローカル変数に置換。</p>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+    <article class="step" data-step="2">
+      <li>
+        <h3>Step 2: eval バッチサイズを train と揃える（修正3）</h3>
+        <p><strong>対象ファイル:</strong> <code>src/train_model/train_gpt.py</code></p>
+        <p><strong>変更内容:</strong> <code>TrainingArguments</code> に <code>per_device_eval_batch_size=args.per_device_train_batch_size</code> を追加。ヘルプ文言「Per-device train/eval batch size」と実挙動を一致させる。</p>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+    <article class="step" data-step="3">
+      <li>
+        <h3>Step 3: max_length 超過時に truncation ではなく raise する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/train_model/train_gpt.py</code></p>
+        <p><strong>変更内容:</strong> <code>RFFMGDataset.__init__</code> の <code>input_ids</code> / <code>labels</code> から <code>[:max_length]</code> を除去。<code>input_ids</code> の長さが <code>max_length</code> を超える例があれば、その index・実長・max_length を含む <code>ValueError</code> を送出。docstring に挙動を追記。</p>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+  </ol>
+</section>
+</body>
+</html>
