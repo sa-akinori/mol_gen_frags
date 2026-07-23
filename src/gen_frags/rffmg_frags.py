@@ -71,8 +71,7 @@ def sc1_make_sentences_for_training(
 if __name__ == '__main__':
     
     parser = argparse.ArgumentParser()
-    parser.add_argument('--frag_method', type=str, default='rc_cms', choices=['brics', 'rc_cms'], 
-                        help='fragmentation method')
+    parser.add_argument('--frag_method', type=str, default='rc_cms', choices=['brics', 'rc_cms'], help='fragmentation method')
     args = parser.parse_args()
 
     # Setting

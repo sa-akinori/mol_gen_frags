@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=1
 
 # リポジトリルートに移動（どこから実行しても相対パスが解決できるようにする）
 cd "$(cd "$(dirname "$0")" && pwd)/../.." || exit 1
@@ -8,9 +8,9 @@ cd "$(cd "$(dirname "$0")" && pwd)/../.." || exit 1
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate t5chem
 
-FRAG_NAME="brics"          # "brics" or "rc_cms"
+FRAG_NAME="rc_cms"          # "brics" or "rc_cms"
 MODE="finetuning"          # "finetuning" or "from_scratch"
-MODEL_NAME="t5chem"        # "t5chem" or "gpt"
+MODEL_NAME="gpt"        # "t5chem" or "gpt"
 
 if [ "$MODE" != "finetuning" ] && [ "$MODE" != "from_scratch" ]; then
     echo "Unknown MODE: ${MODE} (use 'finetuning' or 'from_scratch')" >&2

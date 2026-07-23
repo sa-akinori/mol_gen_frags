@@ -19,17 +19,113 @@ import torch
 from torch.utils.data import Dataset
 from transformers import AutoTokenizer, EarlyStoppingCallback, GPT2Config, GPT2LMHeadModel, PreTrainedTokenizerBase, Trainer, TrainingArguments
 
-from func.utility import set_seed
+from func.utility import set_seed, BASEPATH
+    
+def add_args(parser):
+    
+    parser.add_argument(
+        "--data_dir",
+        type=str,
+        default=f"{BASEPATH}/data/rffmg/brics/normal",
+        help="Directory containing train/val .source/.target files (default: data/rffmg/brics/normal)"
+    )
+
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default=f"{BASEPATH}/models/rffmg/gpt/finetuning/brics",
+        help="Output directory for checkpoints and the best model (default: models/rffmg/gpt/finetuning/brics)"
+    )
+    
+    parser.add_argument(
+        "--frag_method",
+        type=str,
+        default="brics",
+        choices=["brics", "rc_cms"],
+        help="Fragmentation method (default: brics)"
+    )
+    
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="finetuning",
+        choices=["finetuning", "from_scratch"],
+        help="Training mode (default: finetuning)"
+    )
+
+    parser.add_argument(
+        "--pretrain",
+        type=str,
+        default="entropy/gpt2_zinc_87m",
+        help=f"Pretrained model/tokenizer id (default: entropy/gpt2_zinc_87m)"
+    )
+
+    parser.add_argument(
+        "--num_train_epochs",
+        type=int,
+        default=50,
+        help="Number of training epochs (default: 50)"
+    )
+
+    parser.add_argument(
+        "--learning_rate",
+        type=float,
+        default=1e-4,
+        help="Learning rate (default: 1e-4)"
+    )
+
+    parser.add_argument(
+        "--per_device_train_batch_size",
+        type=int,
+        default=32,
+        help="Per-device train/eval batch size (default: 32)"
+    )
+
+    parser.add_argument(
+        "--warmup_steps",
+        type=int,
+        default=10000,
+        help="Warmup steps (default: 10000)"
+    )
+
+    parser.add_argument(
+        "--eval_steps",
+        type=int,
+        default=5000,
+        help="Evaluation interval in steps (default: 5000)"
+    )
+
+    parser.add_argument(
+        "--save_steps",
+        type=int,
+        default=5000,
+        help="Checkpoint interval in steps (default: 5000)"
+    )
+
+    parser.add_argument(
+        "--save_total_limit",
+        type=int,
+        default=5,
+        help="Maximum number of checkpoints to keep (default: 5)"
+    )
+
+    parser.add_argument(
+        "--max_length",
+        type=int,
+        default=256,
+        help="Maximum sequence length (default: 256)"
+    )
+
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed (default: 42)"
+    )
+
+
 
 def read_lines(path: Path) -> list[str]:
-    """Read a newline-separated text file into a list of stripped lines.
-
-    Args:
-        path: Path to a ``.source`` / ``.target`` file (one example per line).
-
-    Returns:
-        List of lines with trailing whitespace removed.
-    """
     with path.open(encoding="utf-8") as f:
         return [line.rstrip() for line in f]
 
@@ -91,44 +187,12 @@ class DataCollatorForCausalLM:
             "labels": torch.tensor(labels, dtype=torch.long),
         }
 
-
-def parse_args() -> argparse.Namespace:
-    """Parse command-line arguments for GPT2 RFFMG training."""
-    parser = argparse.ArgumentParser(description="Train a GPT2 model for RFFMG generation")
-    parser.add_argument("--frag_method", type=str, default="rc_cms", choices=["brics", "rc_cms"],
-                        help="Fragmentation method (default: rc_cms)")
-    parser.add_argument("--mode", type=str, default="finetuning", choices=["finetuning", "from_scratch"],
-                        help="Training mode (default: finetuning)")
-    parser.add_argument("--pretrain", type=str, default="entropy/gpt2_zinc_87m",
-                        help=f"Pretrained model/tokenizer id (default: entropy/gpt2_zinc_87m)")
-    parser.add_argument("--data_dir", type=str, required=True,
-                        help="Directory containing train/val .source/.target files")
-    parser.add_argument("--output_dir", type=str, required=True,
-                        help="Output directory for checkpoints and the best model")
-    parser.add_argument("--num_train_epochs", type=int, default=50,
-                        help="Number of training epochs (default: 50)")
-    parser.add_argument("--learning_rate", type=float, default=1e-4,
-                        help="Learning rate (default: 1e-4)")
-    parser.add_argument("--per_device_train_batch_size", type=int, default=32,
-                        help="Per-device train/eval batch size (default: 32)")
-    parser.add_argument("--warmup_steps", type=int, default=10000,
-                        help="Warmup steps (default: 10000)")
-    parser.add_argument("--eval_steps", type=int, default=5000,
-                        help="Evaluation interval in steps (default: 5000)")
-    parser.add_argument("--save_steps", type=int, default=5000,
-                        help="Checkpoint interval in steps (default: 5000)")
-    parser.add_argument("--save_total_limit", type=int, default=5,
-                        help="Maximum number of checkpoints to keep (default: 5)")
-    parser.add_argument("--max_length", type=int, default=256,
-                        help="Maximum sequence length (default: 256)")
-    parser.add_argument("--seed", type=int, default=42,
-                        help="Random seed (default: 42)")
-    return parser.parse_args()
-
 if __name__ == "__main__":
-
-    args = parse_args()
-
+    
+    parser = argparse.ArgumentParser()
+    add_args(parser)
+    args = parser.parse_args()
+    
     # Run wandb offline unless explicitly overridden by the environment.
     os.environ.setdefault("WANDB_MODE", "offline")
 
@@ -144,14 +208,14 @@ if __name__ == "__main__":
 
     # Model: finetune from pretrained weights or reinitialize the same config.
     if args.mode == "finetuning":
-        model = GPT2LMHeadModel.from_pretrained(args.pretrain)
+        model  = GPT2LMHeadModel.from_pretrained(args.pretrain)
     else:  # from_scratch
         config = GPT2Config.from_pretrained(args.pretrain)
-        model = GPT2LMHeadModel(config)
+        model  = GPT2LMHeadModel(config)
     model.config.pad_token_id = tokenizer.pad_token_id
 
     # Datasets.
-    data_dir = Path(args.data_dir)
+    data_dir      = Path(args.data_dir)
     train_dataset = RFFMGDataset(sources=read_lines(data_dir / "train.source"), targets=read_lines(data_dir / "train.target"), tokenizer=tokenizer, max_length=args.max_length)
     val_dataset   = RFFMGDataset(sources=read_lines(data_dir / "val.source"),   targets=read_lines(data_dir / "val.target"),   tokenizer=tokenizer, max_length=args.max_length)
 
@@ -181,8 +245,8 @@ if __name__ == "__main__":
         data_collator=DataCollatorForCausalLM(tokenizer.pad_token_id),
         callbacks=[EarlyStoppingCallback(early_stopping_patience=15)],
     )
+    
     trainer.train()
 
-    best_model_dir = f"{args.output_dir}/best_model"
-    trainer.save_model(best_model_dir)
-    tokenizer.save_pretrained(best_model_dir)
+    trainer.save_model(f"{args.output_dir}/best_model")
+    tokenizer.save_pretrained(f"{args.output_dir}/best_model")
