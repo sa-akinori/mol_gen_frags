@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Plan: recursion_train 訓練データ拡張 (2026-07-23)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; }
+  h1 { border-bottom: 2px solid #333; }
+  .step { margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+  table { border-collapse: collapse; }
+  th, td { border: 1px solid #ccc; padding: 0.3em 0.6em; text-align: left; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plan: 成功生成データによる訓練データ拡張（recursion_train, 既存関数再利用・.sh実行）</h1>
+  <p class="meta">Date: 2026-07-23 | Status: approved (out_name=augmented, FRAG_METHOD default=brics/user-selectable, reuse make_datasets load_file/save_file)</p>
+</header>
+
+<section id="overview">
+  <h2>概要</h2>
+  <p>frag_num / dup_frags / attach_point_num の3シナリオで t5chem trained モデルが「成功」した生成物
+  （<code>curated_data.tsv</code> の <code>valid_smis_on_frags</code>）を抽出し、現在の訓練データ
+  （<code>normal/train.*</code>）に追加した拡張データセットを新規ディレクトリに構築する。学習は実行せず
+  データ準備のみ。コードは <code>src/recursion_train/</code> に配置し、<strong>新規関数は極力作らず既存関数を
+  再利用</strong>、ロジックは <code>make_datasets.py</code> 同様 <code>__main__</code> にインライン。実行は
+  <code>.sh</code> ラッパ（設定は <code>.sh</code> 内変数）。</p>
+
+  <h3>再利用する既存関数・資産</h3>
+  <table>
+    <tr><th>用途</th><th>再利用するもの</th><th>定義元</th></tr>
+    <tr><td>改行区切りファイル読込</td><td><code>load_file(file_name)</code></td><td><code>src/make_datasets.py</code></td></tr>
+    <tr><td>改行区切りファイル書込</td><td><code>save_file(target, save_file)</code></td><td><code>src/make_datasets.py</code></td></tr>
+    <tr><td>パスのベース</td><td><code>BASEPATH</code></td><td><code>src/func/utility.py</code></td></tr>
+    <tr><td>TSV/CSV・DataFrame</td><td><code>pandas</code></td><td>既存依存</td></tr>
+    <tr><td>リスト文字列パース</td><td><code>ast.literal_eval</code></td><td>標準</td></tr>
+    <tr><td>乱数抽出</td><td><code>random.Random</code></td><td>標準</td></tr>
+  </table>
+  <p><code>load_file</code>/<code>save_file</code> は <code>make_datasets.py</code> にのみ存在するため import して再利用（処理は全て <code>__main__</code> 配下で副作用なし）。</p>
+</section>
+
+<section id="plan">
+  <h2>実装計画</h2>
+  <ol>
+    <article class="step" data-step="1">
+      <li>
+        <h3>Step 1: 抽出・構築スクリプトの作成（インライン実装・新規関数なし）</h3>
+        <p><strong>対象ファイル:</strong> <code>src/recursion_train/build_augmented_dataset.py</code>（新規）</p>
+        <p><strong>変更内容:</strong> モジュール docstring、import順遵守。<code>sys.path.insert(0, .../src)</code>。import は 標準 + <code>pandas</code> + <code>from func.utility import BASEPATH</code> + <code>from make_datasets import load_file, save_file</code>。新規の名前付き関数は定義せず、ロジックは <code>__main__</code> にインライン。</p>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+    <article class="step" data-step="2">
+      <li>
+        <h3>Step 2: __main__ — argparse と抽出・構築処理（インライン）</h3>
+        <p><strong>対象ファイル:</strong> <code>src/recursion_train/build_augmented_dataset.py</code></p>
+        <p><strong>変更内容:</strong> argparse（<code>--frag_method</code>(required), <code>--model_name</code>, <code>--model_ver</code>, <code>--scenarios</code>(nargs+), <code>--n_select</code>(5), <code>--out_name</code>(augmented), <code>--seed</code>(0)）。各シナリオの <code>curated_data.tsv</code> を <code>pd.read_csv</code> で読み、<code>nvalid_onfrags==0</code> をスキップ、<code>ast.literal_eval</code>＋<code>rng.sample</code> で最大 n_select 件抽出して <code>(source, target, scenario)</code> を蓄積。DataFrame 化→<code>drop_duplicates</code>→<code>normal/train</code> 既存ペア除外。<code>save_file</code> で拡張 <code>train.source|target</code> を保存、val/test を <code>load_file</code>→<code>save_file</code> でコピー、<code>added_pairs.csv</code> と <code>augmentation_log.txt</code>（パラメータ＋件数）を出力。map/filter は lambda。</p>
+        <p><strong>依存関係:</strong> Step 1 の後</p>
+      </li>
+    </article>
+    <article class="step" data-step="3">
+      <li>
+        <h3>Step 3: 実行用シェルスクリプト（.sh ラッパ）</h3>
+        <p><strong>対象ファイル:</strong> <code>src/recursion_train/build_augmented_dataset.sh</code>（新規）</p>
+        <p><strong>変更内容:</strong> <code>gen_rffmg.sh</code> と同形式。冒頭に設定変数（<code>FRAG_METHOD, MODEL_NAME, MODEL_VER, SCENARIOS, N_SELECT, OUT_NAME, SEED</code>）を置き、<code>SCRIPT_DIR</code> 解決後に <code>python ${SCRIPT_DIR}/build_augmented_dataset.py --frag_method ${FRAG_METHOD} ...</code> を実行。</p>
+        <p><strong>依存関係:</strong> Step 2 の後</p>
+      </li>
+    </article>
+  </ol>
+</section>
+
+<section id="confirm">
+  <h2>確認したい点</h2>
+  <ul>
+    <li><code>out_name</code> の既定 <code>augmented</code> で良いか。</li>
+    <li><code>.sh</code> の既定 <code>FRAG_METHOD</code> は <code>rc_cms</code> / <code>brics</code> どちらにするか。</li>
+    <li><code>make_datasets</code> からの <code>load_file</code>/<code>save_file</code> import で良いか（共通 util 切り出し案もあるが既存 src 変更が必要）。</li>
+  </ul>
+</section>
+</body>
+</html>
