@@ -11,17 +11,19 @@ conda activate t5chem
 FRAG_NAME="brics"          # "brics" or "rc_cms"
 MODE="finetuning"          # "finetuning" or "from_scratch"
 MODEL_NAME="t5chem"        # "t5chem" or "gpt"
+SAMPLING_NUM=10            # 5 or 10 (uses the data/rffmg/<frag>/<N>times_sampling slice)
 
 if [ "$MODE" != "finetuning" ] && [ "$MODE" != "from_scratch" ]; then
     echo "Unknown MODE: ${MODE} (use 'finetuning' or 'from_scratch')" >&2
     exit 1
 fi
 
-OUTPUT_DIR="models/rffmg/${MODEL_NAME}/${MODE}/${FRAG_NAME}"
+SAMPLING="${SAMPLING_NUM}times_sampling"
+OUTPUT_DIR="models/rffmg/${MODEL_NAME}/${MODE}/${FRAG_NAME}/${SAMPLING}"
 
 # wandb: ログの保存先を repr/model/mode/slice ごとに分ける（ローカルで識別するため）
 export WANDB_MODE=offline
-export WANDB_DIR="wandb/rffmg/${MODEL_NAME}/${MODE}/${FRAG_NAME}"
+export WANDB_DIR="wandb/rffmg/${MODEL_NAME}/${MODE}/${FRAG_NAME}/${SAMPLING}"
 mkdir -p "${WANDB_DIR}"
 
 if [ "$MODEL_NAME" = "t5chem" ]; then
@@ -30,13 +32,14 @@ if [ "$MODEL_NAME" = "t5chem" ]; then
     else
         MODEL_ARG="--tokenizer simple"
     fi
-    t5chem train ${MODEL_ARG} --data_dir data/rffmg/${FRAG_NAME}/normal --output_dir ${OUTPUT_DIR} --task_type product --num_epoch 50
+    t5chem train ${MODEL_ARG} --data_dir data/rffmg/${FRAG_NAME}/${SAMPLING}/normal --output_dir ${OUTPUT_DIR} --task_type product --num_epoch 50
 
 elif [ "$MODEL_NAME" = "gpt" ]; then
     # GPT2 (entropy/gpt2_zinc_87m) を素の transformers で学習。finetuning/from_scratch は train_gpt.py が内部で処理。
     python src/train_model/train_gpt.py \
         --frag_method "${FRAG_NAME}" \
-        --mode "${MODE}"
+        --mode "${MODE}" \
+        --sampling_num "${SAMPLING_NUM}"
 
 else
     echo "Unknown MODEL_NAME: ${MODEL_NAME} (use 't5chem' or 'gpt')" >&2

@@ -104,6 +104,8 @@ def parse_args() -> argparse.Namespace:
                         help="Fragmentation method (default: brics)")
     parser.add_argument("--mode", type=str, default="finetuning", choices=["finetuning", "from_scratch"],
                         help="Training mode (default: finetuning)")
+    parser.add_argument("--sampling_num", type=int, default=10, choices=[5, 10],
+                        help="Fragment-sampling multiplier N, selecting the data/rffmg/<frag>/<N>times_sampling slice (default: 10)")
     parser.add_argument("--pretrain", type=str, default="entropy/gpt2_zinc_87m",
                         help=f"Pretrained model/tokenizer id (default: entropy/gpt2_zinc_87m)")
     parser.add_argument("--num_train_epochs", type=int, default=50,
@@ -151,9 +153,10 @@ if __name__ == "__main__":
         model = GPT2LMHeadModel(config)
     model.config.pad_token_id = tokenizer.pad_token_id
 
-    # Data/output locations derived from frag_method and mode.
-    data_dir = Path(f"{BASEPATH}/data/rffmg/{args.frag_method}/normal")
-    output_dir = f"{BASEPATH}/models/rffmg/gpt/{args.mode}/{args.frag_method}"
+    # Data/output locations derived from frag_method, sampling, and mode.
+    sampling = f"{args.sampling_num}times_sampling"
+    data_dir = Path(f"{BASEPATH}/data/rffmg/{args.frag_method}/{sampling}/normal")
+    output_dir = f"{BASEPATH}/models/rffmg/gpt/{args.mode}/{args.frag_method}/{sampling}"
 
     # Datasets.
     train_dataset = RFFMGDataset(sources=read_lines(data_dir / "train.source"), targets=read_lines(data_dir / "train.target"), tokenizer=tokenizer, max_length=args.max_length)
