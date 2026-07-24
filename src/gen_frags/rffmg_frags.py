@@ -12,8 +12,24 @@ def sc1_make_sentences_for_training(
     fd: str,
     smilesFilePath: str,
     fragmentMethod: str,
-    debug=True
-    ):
+    nSamplingTrialsPerFragset: int = 5,
+    debug: bool = True
+    ) -> pd.DataFrame:
+    """Generate fragment-to-molecule training sentences from curated SMILES.
+
+    Args:
+        fd: Base data directory used to build the log output path.
+        smilesFilePath: Path to the TSV file containing curated SMILES.
+        fragmentMethod: Fragmentation method, either 'brics' or 'rc_cms'.
+        nSamplingTrialsPerFragset: Number of sampling trials per fragment set.
+        debug: If True, subsample 10000 molecules for a quick debug run.
+
+    Returns:
+        DataFrame with columns:
+            - 'sentence': Fragment-to-molecule training sentence.
+            - 'full_fragments': All fragments produced for the molecule.
+            - 'pass_fragments': Fragments that passed the sampling selection.
+    """
     outfd   = f'{fd}/t5chem'
     os.makedirs(outfd, exist_ok=True)
     mols    = pd.read_csv(smilesFilePath, sep='\t', index_col=0)
@@ -41,7 +57,7 @@ def sc1_make_sentences_for_training(
                         trimRonRing=trimRonRing,
                         bigRingThres=7,
                         randomizeSmi=False,
-                        nSamplingTrialsPerFragset=5,
+                        nSamplingTrialsPerFragset=nSamplingTrialsPerFragset,
                         nFragmentPatterns=5,
                         uppMolSizeToFragSize=1.75,
                         uniqunize=False)
@@ -71,8 +87,8 @@ def sc1_make_sentences_for_training(
 if __name__ == '__main__':
     
     parser = argparse.ArgumentParser()
-    parser.add_argument('--frag_method', type=str, default='rc_cms', choices=['brics', 'rc_cms'], 
-                        help='fragmentation method')
+    parser.add_argument('--frag_method', type=str, default='rc_cms', choices=['brics', 'rc_cms'], help='fragmentation method')
+    parser.add_argument('--sampling_num', type=int, default=5, help='number of sampling trials per fragment set (data/rffmg/<frag>/<N>times_sampling)')
     args = parser.parse_args()
 
     # Setting
@@ -81,10 +97,11 @@ if __name__ == '__main__':
     smilesPath  = f'{fd}/curated/passed_filters_rdkit_canonical_smiles.tsv'
 
     # Main
-    frags_df = sc1_make_sentences_for_training(fd, smilesPath, frag_method, debug=False)
+    frags_df = sc1_make_sentences_for_training(fd, smilesPath, frag_method, nSamplingTrialsPerFragset=args.sampling_num, debug=False)
     frags_df['smiles'] = frags_df['sentence'].apply(lambda s : s.split('>>')[-1])
-    os.makedirs(f'{fd}/rffmg/{frag_method}', exist_ok=True)
-    frags_df.to_csv(f'{fd}/rffmg/{frag_method}/full_dataset.csv')
+    out_dir = f'{fd}/rffmg/{frag_method}/{args.sampling_num}times_sampling'
+    os.makedirs(out_dir, exist_ok=True)
+    frags_df.to_csv(f'{out_dir}/full_dataset.csv')
 
 
 

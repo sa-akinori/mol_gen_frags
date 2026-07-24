@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Plan: rffmg_frags.py の sampling_num 復元 (2026-07-24)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; }
+  h1 { border-bottom: 2px solid #333; }
+  .step { margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+  pre { background: #f4f4f4; padding: 0.8em; border-radius: 4px; overflow-x: auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plan: rffmg_frags.py の sampling_num 引数化と保存先変更の復元</h1>
+  <p class="meta">Date: 2026-07-24 | Status: pending-approval</p>
+</header>
+
+<section id="overview">
+  <h2>概要</h2>
+  <p><code>src/gen_frags/rffmg_frags.py</code> が旧版に巻き戻り、次の2点の修正が失われている:</p>
+  <ol>
+    <li><code>nSamplingTrialsPerFragset</code> がハードコード (<code>=5</code>) に戻っている</li>
+    <li>出力先が <code>data/rffmg/{frag}/full_dataset.csv</code> で、<code>{N}times_sampling</code> 階層が無い</li>
+  </ol>
+  <p>下流の <code>run_rffmg.sh</code>（<code>SAMPLING_NUM=10</code> → <code>data/rffmg/${FRAG}/${N}times_sampling/normal</code>）と <code>train_gpt.py</code>（<code>--sampling_num</code>）は既に新レイアウト前提。実データ <code>data/rffmg/{brics,rc_cms}/{5,10}times_sampling/full_dataset.csv</code> も新レイアウトで存在する。git 全履歴・全 worktree・dangling オブジェクトを探索したが復元版は残っておらず、手で書き直す必要がある。</p>
+  <p>ユーザー決定: 引数名は <code>--sampling_num</code>、<strong>default=5</strong>（明示指定しない限り従来挙動）。</p>
+</section>
+
+<section id="plan">
+  <h2>実装計画</h2>
+  <ol>
+    <article class="step" data-step="1">
+      <li>
+        <h3>Step 1: 関数 sc1_make_sentences_for_training に sampling 引数を追加</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_frags/rffmg_frags.py</code></p>
+        <p><strong>変更内容:</strong> シグネチャに <code>nSamplingTrialsPerFragset: int = 5</code> を追加（型ヒント必須）。<code>Smi2SentenceOpt(...)</code> 内の <code>nSamplingTrialsPerFragset=5</code>（44行目）を引数を渡す形に変更。Google style docstring を追加/更新し、返す DataFrame のカラム名 <code>sentence, full_fragments, pass_fragments</code> を明記。</p>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+    <article class="step" data-step="2">
+      <li>
+        <h3>Step 2: __main__ に --sampling_num を追加し関数へ伝播</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_frags/rffmg_frags.py</code></p>
+        <p><strong>変更内容:</strong> <code>parser.add_argument('--sampling_num', type=int, default=5, help='...')</code> を追加。<code>sc1_make_sentences_for_training(fd, smilesPath, frag_method, nSamplingTrialsPerFragset=args.sampling_num, debug=False)</code> として伝播。</p>
+        <p><strong>依存関係:</strong> Step 1 の後</p>
+      </li>
+    </article>
+    <article class="step" data-step="3">
+      <li>
+        <h3>Step 3: 保存先を {N}times_sampling 階層に変更</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_frags/rffmg_frags.py</code></p>
+        <p><strong>変更内容:</strong> 86–87行目を次に変更:</p>
+        <pre>out_dir = f'{fd}/rffmg/{frag_method}/{args.sampling_num}times_sampling'
+os.makedirs(out_dir, exist_ok=True)
+frags_df.to_csv(f'{out_dir}/full_dataset.csv')</pre>
+        <p>これで <code>run_rffmg.sh</code> / <code>train_gpt.py</code> が参照するパスと一致する。</p>
+        <p><strong>依存関係:</strong> Step 2 の後</p>
+      </li>
+    </article>
+    <article class="step" data-step="4">
+      <li>
+        <h3>Step 4: 動作確認（read-only）</h3>
+        <p><strong>対象ファイル:</strong> なし（確認のみ）</p>
+        <p><strong>変更内容:</strong> <code>python -c</code> で argparse とパス組み立てのみ検証（未指定→5, <code>=10</code>→<code>10times_sampling</code>）。重い分子生成本体は実行しない（既存データを上書きしないため）。</p>
+        <p><strong>依存関係:</strong> Step 3 の後</p>
+      </li>
+    </article>
+  </ol>
+</section>
+
+<section id="notes">
+  <h2>未確定事項</h2>
+  <ul>
+    <li>ログ出力先 <code>outfd = f'{fd}/t5chem'</code>（17行目）は今回のスコープ外（変更しない）。実データの <code>data/rffmg/sentences_logs.txt</code> は旧世代の産物と判断。</li>
+    <li>worktree はユーザー方針によりメインで直接作業。</li>
+  </ul>
+</section>
+</body>
+</html>

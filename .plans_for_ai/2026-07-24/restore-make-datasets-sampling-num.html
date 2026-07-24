@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Plan: make_datasets.py の sampling_num 対応 (2026-07-24)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; }
+  h1 { border-bottom: 2px solid #333; }
+  .step { margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+  pre { background: #f4f4f4; padding: 0.8em; border-radius: 4px; overflow-x: auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plan: make_datasets.py の sampling_num 対応（{N}times_sampling 階層）</h1>
+  <p class="meta">Date: 2026-07-24 | Status: pending-approval</p>
+</header>
+
+<section id="overview">
+  <h2>概要</h2>
+  <p><code>rffmg_frags.py</code> の復元で出力先が <code>data/rffmg/{frag}/{N}times_sampling/full_dataset.csv</code> になったが、<code>src/make_datasets.py</code> は旧レイアウト（times_sampling 階層なし）のまま。このままでは <code>full_dataset.csv</code> を読めず、各評価用データセットも旧パスに出力してしまう。下流（<code>run_rffmg.sh</code> は <code>data/rffmg/${FRAG}/${N}times_sampling/normal</code> 参照）と揃える必要がある。</p>
+  <h3>確認済み前提</h3>
+  <ul>
+    <li><code>data/rffmg/{frag}/{N}times_sampling/</code> 配下に full_dataset.csv, normal/, unique_frags.csv, frag_order/, frag_num/, dup_frags/, attach_point_num/ が存在（実データ確認済み）。</li>
+    <li><code>data/safe/{frag}/</code> は times_sampling 階層を<strong>持たない</strong> → <strong>safe 系パスは変更しない</strong>。</li>
+    <li>引数名・デフォルトは rffmg_frags.py と統一: <code>--sampling_num</code>（int, default=5）。</li>
+  </ul>
+</section>
+
+<section id="plan">
+  <h2>実装計画</h2>
+  <ol>
+    <article class="step" data-step="1">
+      <li>
+        <h3>Step 1: --sampling_num 引数を追加</h3>
+        <p><strong>対象ファイル:</strong> <code>src/make_datasets.py</code></p>
+        <p><strong>変更内容:</strong> argparse に <code>--sampling_num</code>（type=int, default=5, help 付き）を <code>--frag_method</code> の直後に追加。</p>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+    <article class="step" data-step="2">
+      <li>
+        <h3>Step 2: rffmg 出力ベースディレクトリ変数を導入</h3>
+        <p><strong>対象ファイル:</strong> <code>src/make_datasets.py</code></p>
+        <p><strong>変更内容:</strong> Setting 節に <code>rffmg_dir = f'{fd}/rffmg/{frag_method}/{args.sampling_num}times_sampling'</code> を追加。パス重複を排除（スタイル規約準拠）。</p>
+        <p><strong>依存関係:</strong> Step 1 の後</p>
+      </li>
+    </article>
+    <article class="step" data-step="3">
+      <li>
+        <h3>Step 3: rffmg 系パスを rffmg_dir ベースへ置換</h3>
+        <p><strong>対象ファイル:</strong> <code>src/make_datasets.py</code></p>
+        <p><strong>変更内容:</strong> <code>f'{fd}/rffmg/{frag_method}/...'</code>（L57, 76–78, 86–88, 122, 127–128, 131–132, 142–146, 150, 154, 174–176, 180, 185, 235–238, 242, 245, 276–278）を <code>f'{rffmg_dir}/...'</code> に置換。safe 系（L59, 105–106, 118–119）は対象外。</p>
+        <p><strong>依存関係:</strong> Step 2 の後</p>
+      </li>
+    </article>
+    <article class="step" data-step="4">
+      <li>
+        <h3>Step 4: 動作確認（read-only）</h3>
+        <p><strong>対象ファイル:</strong> なし（確認のみ）</p>
+        <p><strong>変更内容:</strong> <code>python -m py_compile</code> で構文確認。<code>grep</code> で <code>{fd}/rffmg/{frag_method}</code> の残存が無い（safe 側のみ残る）ことを確認。<code>--sampling_num</code> 未指定→5times_sampling, <code>=10</code>→10times_sampling を静的確認。本体処理は実行しない。</p>
+        <p><strong>依存関係:</strong> Step 3 の後</p>
+      </li>
+    </article>
+  </ol>
+</section>
+
+<section id="notes">
+  <h2>スコープ外・別件</h2>
+  <ul>
+    <li><strong>safe 系パス</strong>（L59, 105–106, 118–119）は変更しない（data/safe に times_sampling 階層が無い）。</li>
+    <li><strong>別件（要判断）:</strong> <code>src/gen_mols/gen_rffmg.py</code> L40 <code>data/rffmg/{frag_method}/{additional_path}</code> も times_sampling 未対応。実データはこの下にあるため本来は同様の修正が必要。今回のスコープ外だが対応要否を確認する。</li>
+    <li>worktree はユーザー方針によりメインで直接作業。</li>
+  </ul>
+</section>
+</body>
+</html>
