@@ -16,4 +16,4 @@ echo "Python: $(which python)"
 echo "t5chem: $(which t5chem)"
 
 # Run
-python ~/Research/mol_gen_frags/src/gen_mols/gen_t5chem.py
+python ~/Research/mol_gen_frags/src/gen_mols/gen_rffmg.py
