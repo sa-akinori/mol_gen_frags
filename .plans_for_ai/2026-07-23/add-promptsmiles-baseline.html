@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Plan: PromptSMILES をベースラインモデルとして追加 (2026-07-23)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; }
+  h1 { border-bottom: 2px solid #333; }
+  .step { margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plan: PromptSMILES をベースラインモデルとして追加</h1>
+  <p class="meta">Date: 2026-07-23 | Status: pending-approval</p>
+</header>
+
+<section id="overview">
+  <h2>概要</h2>
+  <p>PromptSMILES (Thomas et al., <em>J. Cheminform.</em> 2024) をベースラインモデルとして本プロジェクトに組み込む。
+  PromptSMILES 自体は「制約付き生成（scaffold decoration / fragment linking）を再学習なしで行う推論時プロンプト手法」だが、
+  公平な比較のためには<strong>ベースとなる化学言語モデル（prior）を既存モデルと同一の ChEMBL31 コーパスで再学習する必要がある</strong>。</p>
+  <ul>
+    <li><strong>ベースCLMアーキ</strong>: <code>GTr</code>（StableTransformerEncoder。RFFMG-GPT(GPT2) と系統を揃え比較しやすくするため）</li>
+    <li><strong>評価タスク</strong>: Scaffold decoration + Fragment linking</li>
+    <li><strong>実行環境</strong>: 新規 conda 環境 <code>env_promptsmiles</code>（既存 env との依存衝突回避）</li>
+    <li>外部パッケージ <code>smiles-rnn</code> / <code>promptsmiles</code>（いずれも MIT）を利用し、本リポジトリには既存構成に合わせた薄いラッパーのみ追加する。</li>
+  </ul>
+  <p><strong>タスク入力のマッピング方針</strong>: 既存の RFFMG/SAFE 比較と条件を揃えるため、評価用スキャフォールド／フラグメントは
+  テストセット分子から既存の <code>src/func/fragmentation.py</code> を用いて生成し、PromptSMILES の記法（結合点を <code>*</code>、
+  フラグメント区切りを <code>.</code>）に変換する。</p>
+</section>
+
+<section id="plan">
+  <h2>実装計画</h2>
+  <ol>
+    <article class="step" data-step="1">
+      <li>
+        <h3>Step 1: 新規 conda 環境のセットアップ手順を追加</h3>
+        <p><strong>対象ファイル:</strong> <code>src/train_model/setup_promptsmiles_env.sh</code>（新規）</p>
+        <p><strong>変更内容:</strong> <code>conda create -n env_promptsmiles python=3.11</code> → <code>pip install smiles-rnn promptsmiles molscore</code> → torch(cu128)/rdkit/pandas/numpy をスクリプト化。用途・GPU前提をコメント明記。</p>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+    <article class="step" data-step="2">
+      <li>
+        <h3>Step 2: 学習コーパスの書き出しスクリプト</h3>
+        <p><strong>対象ファイル:</strong> <code>src/make_promptsmiles_corpus.py</code>（新規）</p>
+        <p><strong>変更内容:</strong> <code>data/curated/passed_filters_rdkit_canonical_smiles.tsv</code> の <code>rdkit_washed_smiles</code> 列を読み込み、RDKit None チェック→重複除去→<code>random_state=42</code> で train/val/test 分割し <code>data/promptsmiles/{train,val,test}.smi</code> を出力。件数ログ保存。型ヒント・Google style docstring 付与。</p>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+    <article class="step" data-step="3">
+      <li>
+        <h3>Step 3: prior 学習ラッパースクリプト</h3>
+        <p><strong>対象ファイル:</strong> <code>src/train_model/run_promptsmiles.sh</code>（新規）</p>
+        <p><strong>変更内容:</strong> <code>run_safe.sh</code> の作法に倣い、<code>train_prior.py GTr -i .../train.smi --valid_smiles .../val.smi -o models/promptsmiles/gtr -s chembl31 --grammar SMILES --randomize --device gpu</code> を実行。ハイパラは上部変数化・ログ化。</p>
+        <p><strong>依存関係:</strong> Step 1, Step 2 の後</p>
+      </li>
+    </article>
+    <article class="step" data-step="4">
+      <li>
+        <h3>Step 4: 生成スクリプト（scaffold decoration / fragment linking）</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_mols/gen_promptsmiles.py</code> + <code>gen_promptsmiles.sh</code>（新規）</p>
+        <p><strong>変更内容:</strong> 学習済み prior をロードし <code>promptsmiles</code> の <code>ScaffoldDecorator</code>/<code>FragmentLinker</code> に <code>sample_fn</code>/<code>evaluate_fn</code> を渡して生成。<code>--task {scaffold,linking}</code>, <code>--frag_method</code>, <code>--n_samples</code>, <code>--random_seed 42</code> を引数化。結果を evaluation.py が読める形式で保存。</p>
+        <p><strong>依存関係:</strong> Step 3 の後</p>
+      </li>
+    </article>
+    <article class="step" data-step="5">
+      <li>
+        <h3>Step 5: 評価パイプラインへの統合</h3>
+        <p><strong>対象ファイル:</strong> <code>src/evaluation.py</code>（+ 必要なら <code>src/func/evaluation_func.py</code>）</p>
+        <p><strong>変更内容:</strong> <code>--model_name</code> に <code>promptsmiles</code> を追加し分岐・出力読み取りを配線。validity / uniqueness / novelty / reconstruction を RFFMG・SAFE と同一関数で算出。</p>
+        <p><strong>依存関係:</strong> Step 4 の後</p>
+      </li>
+    </article>
+    <article class="step" data-step="6">
+      <li>
+        <h3>Step 6: 再現性・ログの担保（横断）</h3>
+        <p><strong>対象ファイル:</strong> Step 2–5 の各スクリプト</p>
+        <p><strong>変更内容:</strong> <code>set_seed(42)</code>、乱数シード明示、ハイパラ・メトリクスのログ保存、wandb offline ディレクトリ分離、データパスの <code>Path</code> 化。</p>
+        <p><strong>依存関係:</strong> Step 2–5 に内包</p>
+      </li>
+    </article>
+  </ol>
+</section>
+
+<section id="notes">
+  <h2>補足・確認事項</h2>
+  <ol>
+    <li><strong>学習エポック/バッチ</strong>: 既存 SAFE は 50 epoch。prior の妥当な epoch 数を決定（暫定 10〜50）。</li>
+    <li><strong>GPU/学習時間</strong>: 約188万件コーパスでの Transformer prior 学習は数時間規模。実行タイミング要相談。</li>
+    <li><strong>評価スキャフォールド集合</strong>: 論文の 17 スキャフォールドか本プロジェクトのテスト分子由来か。本計画は後者（比較整合性重視）を採用。</li>
+  </ol>
+</section>
+</body>
+</html>
