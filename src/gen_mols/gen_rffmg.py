@@ -1,7 +1,9 @@
 import os
-import subprocess
 import argparse
+from pathlib import Path
+
 from func.utility import BASEPATH
+from func.generation_time import run_and_record_time
 
 if __name__=='__main__':
 
@@ -12,8 +14,10 @@ if __name__=='__main__':
                         help='Backend model: t5chem (T5) or gpt (GPT2) (default: t5chem)')
     parser.add_argument('--frag_method', type=str, default='rc_cms', choices=['rc_cms', 'brics'],
                         help='Dataset slice name (default: rc_cms)')
-    parser.add_argument('--model_ver', type=str, default='finetuning', choices=['finetuning', 'from_scratch', 'pretrained'],
+    parser.add_argument('--model_ver', type=str, default='finetuning', choices=['finetuning', 'from_scratch'],
                         help='Model version (default: finetuning)')
+    parser.add_argument('--sampling_num', type=int, default=10, choices=[5, 10],
+                        help='Fragment-sampling multiplier N, selecting the data/rffmg/<frag>/<N>times_sampling slice (default: 10)')
 
     # Generation parameters
     parser.add_argument('--additional_path', type=str, default='normal', choices=['normal', 'dup_frags', 'frag_num', 'frag_order', 'attach_point_num'],
@@ -35,9 +39,10 @@ if __name__=='__main__':
     model_name = args.model_name
     model_ver = args.model_ver
     additional_path = args.additional_path
-    model_path  = f'{BASEPATH}/models/rffmg/{model_name}/{model_ver}/{frag_method}/best_model'
-    output_dir  = f'{BASEPATH}/results/rffmg/{model_name}/{model_ver}/{frag_method}/{gen_method}/{additional_path}'
-    dataset_dir = f'{BASEPATH}/data/rffmg/{frag_method}/{additional_path}'
+    sampling = f'{args.sampling_num}times_sampling'
+    model_path  = f'{BASEPATH}/models/rffmg/{model_name}/{model_ver}/{frag_method}/{sampling}/best_model'
+    output_dir  = f'{BASEPATH}/results/rffmg/{model_name}/{model_ver}/{frag_method}/{sampling}/{gen_method}/{additional_path}'
+    dataset_dir = f'{BASEPATH}/data/rffmg/{frag_method}/{sampling}/{additional_path}'
     os.makedirs(output_dir, exist_ok=True)
 
     # Generate compounds (beam search). Both backends write predictions.csv with columns
@@ -65,4 +70,20 @@ if __name__=='__main__':
             "--batch_size", str(args.batch_size),
             "--random_seed", str(args.random_seed),
         ]
-    subprocess.run(cmd, check=True)
+    json_path = run_and_record_time(
+        cmd,
+        Path(output_dir),
+        n_samples=args.n_samples,
+        params={
+            "backend": model_name,
+            "model_ver": model_ver,
+            "frag_method": frag_method,
+            "sampling_num": args.sampling_num,
+            "additional_path": additional_path,
+            "num_beams": args.num_beams,
+            "batch_size": args.batch_size,
+            "model_path": model_path,
+            "random_seed": args.random_seed,
+        },
+    )
+    print(f"Saved generation time to: {json_path}")

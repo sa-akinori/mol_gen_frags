@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Plan: gen_rffmg の pretrained 選択肢を削除する (2026-07-27)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; }
+  h1 { border-bottom: 2px solid #333; }
+  .step { margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+  pre { background: #f4f4f4; padding: 0.8em; border-radius: 4px; overflow-x: auto; }
+  .warn { background: #fff8e1; border-left: 4px solid #e6a700; padding: 0.8em 1em; margin: 1em 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plan: gen_rffmg の <code>pretrained</code> 選択肢を削除する</h1>
+  <p class="meta">Date: 2026-07-27 | Status: approved（ユーザー指示による）</p>
+</header>
+
+<section id="overview">
+  <h2>概要</h2>
+  <p>
+    <code>src/gen_mols/gen_rffmg.py</code> の <code>--model_ver</code> は <code>pretrained</code> を
+    選べるが、選ぶと必ず存在しないパスを組み立てるため、実質的に死んだ選択肢になっている。
+  </p>
+<pre><code>組み立てるパス: models/rffmg/{model_name}/pretrained/{frag}/{sampling}/best_model
+実物          : models/rffmg/t5chem/pretrained/{config.json, pytorch_model.bin, ...}  ← フラット</code></pre>
+  <p>
+    事前学習モデルは断片化手法にもサンプリング数にも依存しないためフラット構成が正しく、
+    学習側 <code>run_rffmg.sh:31</code> も <code>--pretrain models/rffmg/{model}/pretrained</code> と
+    フラットに参照している。RFFMG の生成に事前学習モデルを使う予定はないため、選択肢自体を削除する。
+  </p>
+
+  <h3>スコープ外（触らないもの）</h3>
+  <div class="warn">
+    <ul>
+      <li><code>src/gen_mols/gen_safe.py</code> / <code>gen_safe.sh</code>:
+        SAFE の <code>pretrained</code> は実在し、<code>if model_ver == 'pretrained':</code> の分岐で
+        正しく扱われている（<code>results/safe_gpt/pretrained/</code> に実績あり）。</li>
+      <li><code>src/evaluation.py:16</code>: <code>--model_name</code> が <code>t5chem</code> /
+        <code>safe_gpt</code> / <code>gpt</code> を共有しており、<code>safe_gpt</code> の
+        <code>pretrained</code> 評価に必要。ここから消すと SAFE 側が壊れる。</li>
+      <li><code>src/train_model/run_rffmg.sh:31</code>: finetuning の初期値として
+        事前学習モデルを指す正当な参照。</li>
+    </ul>
+  </div>
+</section>
+
+<section id="plan">
+  <h2>実装計画</h2>
+  <ol>
+    <article class="step" data-step="1">
+      <li>
+        <h3>Step 1: <code>gen_rffmg.py</code> の choices から <code>pretrained</code> を外す</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_mols/gen_rffmg.py</code></p>
+        <p><strong>変更内容:</strong> L17-18 の <code>--model_ver</code> を
+          <code>choices=['finetuning', 'from_scratch', 'pretrained']</code> から
+          <code>choices=['finetuning', 'from_scratch']</code> に変更する。
+          <code>default='finetuning'</code> と help 文言
+          (<code>Model version (default: finetuning)</code>) はそのまま。</p>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="2">
+      <li>
+        <h3>Step 2: <code>gen_rffmg.sh</code> のコメントから <code>pretrained</code> を外す</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_mols/gen_rffmg.sh</code></p>
+        <p><strong>変更内容:</strong> L6 のコメントを
+          <code>MODEL_VER="finetuning" # "finetuning", "from_scratch", "pretrained"</code> から
+          <code>MODEL_VER="finetuning" # "finetuning", "from_scratch"</code> に変更する。
+          コメントの書式（値の直後に半角1つ + <code>#</code>、ダブルクォート付きの列挙）は維持する。</p>
+        <p><strong>依存関係:</strong> Step 1 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="3">
+      <li>
+        <h3>Step 3: 動作確認</h3>
+        <p><strong>対象ファイル:</strong> 変更なし（確認のみ）</p>
+        <ul>
+          <li><code>python -m py_compile src/gen_mols/gen_rffmg.py</code></li>
+          <li><code>python src/gen_mols/gen_rffmg.py --help</code> で <code>--model_ver</code> が
+            <code>{finetuning,from_scratch}</code> になること。</li>
+          <li><code>python src/gen_mols/gen_rffmg.py --model_ver pretrained</code> が argparse の
+            エラーで即座に弾かれること（従来は実行が進んでから FileNotFoundError になっていた）。</li>
+          <li><code>bash -n src/gen_mols/gen_rffmg.sh</code></li>
+          <li><code>gen_safe.py --help</code> の <code>--model_ver</code> に <code>pretrained</code> が
+            残っていること（巻き添え変更がないことの確認）。</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 2 の後</p>
+      </li>
+    </article>
+  </ol>
+</section>
+</body>
+</html>

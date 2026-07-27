@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Plan: 推論(分子生成)時間を保存する (2026-07-27)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; }
+  h1 { border-bottom: 2px solid #333; }
+  .step { margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+  pre { background: #f4f4f4; padding: 0.8em; border-radius: 4px; overflow-x: auto; }
+  table { border-collapse: collapse; margin: 1em 0; }
+  th, td { border: 1px solid #ccc; padding: 0.4em 0.8em; text-align: left; }
+  th { background: #f0f0f0; }
+  .warn { background: #fff8e1; border-left: 4px solid #e6a700; padding: 0.8em 1em; margin: 1em 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plan: 推論(分子生成)時間を保存する</h1>
+  <p class="meta">Date: 2026-07-27 | Status: approved</p>
+</header>
+
+<section id="overview">
+  <h2>概要</h2>
+  <p>
+    現在、どの生成エントリポイントも推論にかかった時間を一切保存していない
+    (<code>results/</code> 配下に時間を記録したファイルはゼロ)。
+    推論1回ごとのウォールクロック時間を、<code>predictions.csv</code> と同じ出力ディレクトリに
+    JSON で保存できるようにする。
+  </p>
+
+  <h3>対象エントリポイント</h3>
+  <table>
+    <tr><th>エントリポイント</th><th>バックエンド</th><th>出力</th></tr>
+    <tr>
+      <td><code>src/gen_mols/gen_rffmg.py</code></td>
+      <td>外部 <code>t5chem predict</code> CLI / <code>generation_rffmg_func.py</code> (GPT2)</td>
+      <td><code>generation_time.json</code></td>
+    </tr>
+    <tr>
+      <td><code>src/gen_mols/gen_safe.py</code></td>
+      <td><code>generation_safe_func.py</code> (machine_id でシャーディング)</td>
+      <td><code>generation_time_{machine_id}.json</code></td>
+    </tr>
+  </table>
+  <p>
+    <code>src/gen_safe.py</code>(ルート直下の direct 版)・<code>src/gen_safe_denovo.py</code>・
+    <code>src/gen_t5chem.py</code> は今回のスコープ外
+    (必要なら同じヘルパーを後から呼ぶだけで拡張できる設計にする)。
+  </p>
+
+  <h3>設計方針</h3>
+  <ol>
+    <li><strong>計測は subprocess の外側(wrapper 側)で行う</strong>。t5chem は外部インストール済み CLI で
+      変更できないため、両バックエンドで共通に取れるのは「生成プロセス全体の経過時間」のみ。
+      モデルロード時間を含む点は仕様として JSON に明記する。</li>
+    <li><strong>共通ヘルパーは新規モジュール <code>src/func/generation_time.py</code> に置く</strong>。
+      <code>utility.py</code> はタブインデント・型ヒントなしのレガシー集積所であり、
+      <code>.claude/CLAUDE.md</code> のコードスタイル(型ヒント必須・Google style docstring)に合わない。
+      <code>generation_rffmg_func.py</code> / <code>generation_safe_func.py</code> と同じ
+      「生成関連は専用モジュール」の既存パターンにも沿う。</li>
+    <li><strong>分子数は入力ファイルではなく出力 <code>predictions*.csv</code> の行数から数える</strong>。
+      理由: <code>gen_rffmg.py</code> の <code>dataset_dir</code>
+      (<code>data/rffmg/{frag}/{additional}</code>) はディスク上の実レイアウト
+      (<code>data/rffmg/{frag}/{n}times_sampling/{additional}</code>) とずれており、
+      <code>test.source</code> を数える方式は 0 を返して壊れる。
+      出力CSVは両バックエンドとも「1分子=1行」で安定している。</li>
+    <li><strong>subprocess が失敗した場合(<code>check=True</code> で例外)は JSON を書かない</strong>。
+      途中で落ちた実行の時間はベンチマークとして無意味なため。</li>
+    <li><strong>再現性への影響なし</strong>。乱数シード・cmd・生成パラメータには一切触れず、
+      計測は受動的な観測のみ。</li>
+  </ol>
+
+  <h3>既存作業との関係</h3>
+  <p>
+    未マージのブランチ <code>worktree-gen-time-logging</code> (commit <code>3877951</code>, 2026-07-23) に
+    <code>gen_rffmg.py</code> 内へ直接ヘルパーを書く形の実装が既にある。ただし
+    (a) <code>gen_rffmg</code> のみで SAFE 側に再利用できない、
+    (b) 分子数を <code>test.source</code> から数えるため上記3の理由で 0 になる、
+    (c) ブランチが <code>make_datasets.py</code> / <code>train_gpt.py</code> の古い状態を含み main と衝突する、
+    ため <strong>cherry-pick せず main 上で作り直す</strong>。
+    設計思想(perf_counter + JSON + 主要キー)は踏襲する。
+  </p>
+</section>
+
+<section id="plan">
+  <h2>実装計画</h2>
+  <ol>
+    <article class="step" data-step="1">
+      <li>
+        <h3>Step 1: 共通ヘルパーモジュールを新規作成する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/func/generation_time.py</code> (新規)</p>
+        <p><strong>変更内容:</strong></p>
+        <ul>
+          <li>import 順は 標準ライブラリ(<code>json</code>, <code>subprocess</code>, <code>time</code>,
+            <code>datetime</code>, <code>pathlib</code>, <code>typing</code>)
+            → サードパーティ(<code>pandas</code>) → ローカル(なし)。</li>
+          <li>型ヒント + Google style docstring 付きの関数を2つ定義する。</li>
+        </ul>
+<pre><code>def count_prediction_rows(output_dir: Path, pattern: str = "predictions*.csv") -&gt; int | None:
+    """生成結果CSVの行数(=処理した分子数)を数える。
+
+    Args:
+        output_dir: predictions CSV が置かれたディレクトリ。
+        pattern: 対象を選ぶ glob パターン。シャード実行時は
+            ``predictions_{machine_id}.csv`` のように自分の分だけを指定する。
+
+    Returns:
+        マッチしたCSVの合計行数。1ファイルもマッチしない場合は None。
+    """</code></pre>
+<pre><code>def run_and_record_time(
+    cmd: list[str],
+    output_dir: Path,
+    n_samples: int,
+    params: dict[str, Any] | None = None,
+    record_name: str = "generation_time.json",
+    predictions_pattern: str = "predictions*.csv",
+) -&gt; Path:
+    """生成コマンドを実行し、経過時間をJSONに保存する。
+
+    ``subprocess.run(cmd, check=True)`` を ``time.perf_counter()`` で挟み、
+    完了後に ``output_dir/record_name`` へ記録を書き出す。コマンドが失敗した
+    場合は例外がそのまま送出され、JSONは書かれない。
+
+    Args:
+        cmd: subprocess に渡すコマンド。
+        output_dir: predictions と同じ出力ディレクトリ(無ければ作成)。
+        n_samples: 1分子あたりの生成サンプル数。
+        params: 記録しておく生成パラメータ(num_beams, model_path 等)。
+        record_name: 出力するJSONのファイル名。
+        predictions_pattern: 分子数を数えるための glob パターン。
+
+    Returns:
+        書き出したJSONファイルのパス。
+    """</code></pre>
+        <p><strong>JSON のキー:</strong></p>
+        <table>
+          <tr><th>key</th><th>内容</th></tr>
+          <tr><td><code>elapsed_sec</code></td><td>生成プロセス全体の経過秒(小数第3位まで丸め、モデルロード込み)</td></tr>
+          <tr><td><code>n_molecules</code></td><td>出力CSVの行数。数えられない場合 <code>null</code></td></tr>
+          <tr><td><code>n_samples</code></td><td>1分子あたりの生成サンプル数</td></tr>
+          <tr><td><code>sec_per_molecule</code></td><td><code>elapsed_sec / n_molecules</code>(0件・不明時は <code>null</code>)</td></tr>
+          <tr><td><code>recorded_at</code></td><td><code>datetime.datetime.now().isoformat(timespec="seconds")</code></td></tr>
+          <tr><td><code>params</code></td><td>バックエンド固有の生成パラメータ(dict)</td></tr>
+        </table>
+        <p>
+          <code>elapsed_sec</code> の計測は <code>time.perf_counter()</code>(単調時計)、
+          <code>recorded_at</code> は壁時計と使い分ける。
+          <code>utility.GetTime()</code> は区切りなしの数字列(例 <code>2026727_1430</code>)で
+          パースしづらいため使わない。
+        </p>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="2">
+      <li>
+        <h3>Step 2: <code>gen_rffmg.py</code> の subprocess 呼び出しを差し替える</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_mols/gen_rffmg.py</code></p>
+        <p><strong>変更内容:</strong> <code>import subprocess</code> を削除し、
+          <code>from pathlib import Path</code> と
+          <code>from func.generation_time import run_and_record_time</code> を追加(import 順は維持)。
+          末尾の <code>subprocess.run(cmd, check=True)</code> を以下に置き換える。
+          このスクリプトはシャーディングしないので <code>record_name</code> /
+          <code>predictions_pattern</code> は既定値のまま。</p>
+<pre><code>json_path = run_and_record_time(
+    cmd,
+    Path(output_dir),
+    n_samples=args.n_samples,
+    params={
+        "backend": model_name,
+        "model_ver": model_ver,
+        "frag_method": frag_method,
+        "additional_path": additional_path,
+        "num_beams": args.num_beams,
+        "batch_size": args.batch_size,
+        "model_path": model_path,
+        "random_seed": args.random_seed,
+    },
+)
+print(f"Saved generation time to: {json_path}")</code></pre>
+        <p><strong>依存関係:</strong> Step 1 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="3">
+      <li>
+        <h3>Step 3: <code>gen_safe.py</code> の subprocess 呼び出しを差し替える</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_mols/gen_safe.py</code></p>
+        <p><strong>変更内容:</strong> <code>import subprocess</code> を削除し、
+          <code>from pathlib import Path</code> と
+          <code>from func.generation_time import run_and_record_time</code> を追加。
+          未使用の <code>import itertools</code> / <code>import os</code> は
+          実際に未使用であることを確認したうえで整理する。
+          末尾の <code>subprocess.run(cmd, check=True)</code> を以下に置き換える。
+          <code>predictions_{machine_id}.csv</code> / <code>error_logs_{machine_id}.csv</code> と
+          同じ suffix 規約に揃えることで、複数マシンが同一 <code>output_dir</code> に
+          同時書き込みしても衝突しない(ロック不要)。</p>
+<pre><code>json_path = run_and_record_time(
+    cmd,
+    Path(output_dir),
+    n_samples=args.n_samples,
+    params={
+        "backend": "safe_gpt",
+        "model_ver": model_ver,
+        "frag_method": frag_method,
+        "num_beams": args.num_beams,
+        "max_length": args.max_length,
+        "model_path": model_path,
+        "machine_id": args.machine_id,
+        "total_machines": args.total_machines,
+        "random_seed": args.random_seed,
+    },
+    record_name=f"generation_time_{args.machine_id}.json",
+    predictions_pattern=f"predictions_{args.machine_id}.csv",
+)
+print(f"Saved generation time to: {json_path}")</code></pre>
+        <p><strong>依存関係:</strong> Step 1 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="4">
+      <li>
+        <h3>Step 4: 動作確認</h3>
+        <p><strong>対象ファイル:</strong> 変更なし(確認のみ)</p>
+        <p><strong>変更内容:</strong></p>
+        <ul>
+          <li><code>python -m py_compile src/func/generation_time.py src/gen_mols/gen_rffmg.py src/gen_mols/gen_safe.py</code></li>
+          <li>一時ディレクトリでの単体確認: ダミー <code>predictions.csv</code> を置き、
+            <code>cmd = ["python", "-c", "import time; time.sleep(0.2)"]</code> で
+            <code>run_and_record_time</code> を呼び、<code>elapsed_sec</code> ≈ 0.2 /
+            <code>n_molecules</code> がCSV行数と一致 / <code>sec_per_molecule</code> が
+            整合することを確認。</li>
+          <li>失敗系: <code>cmd = ["python", "-c", "raise SystemExit(1)"]</code> で
+            <code>CalledProcessError</code> が送出され、JSONが作られないことを確認。</li>
+          <li>実際のGPU生成は重いので走らせない(既存 <code>predictions.csv</code> は上書きしない)。</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 2・Step 3 の後</p>
+      </li>
+    </article>
+  </ol>
+</section>
+
+<section id="implementation-notes">
+  <h2>実装時の計画からの差分</h2>
+  <p>
+    計画の Step 1 のコードスケッチでは docstring を日本語で書いていたが、実装では英語に統一した。
+    <code>src/func/</code> の既存モジュール(<code>generation_rffmg_func.py</code>,
+    <code>generation_safe_func.py</code>)がすべて英語 docstring であり、1ファイル内で
+    モジュール docstring(英語)と関数 docstring(日本語)が混在するのを避けるため。
+    内容(引数説明・戻り値・キー)は計画どおり。
+  </p>
+</section>
+
+<section id="notes">
+  <h2>今回スコープ外(別途要判断)</h2>
+  <div class="warn">
+    <p><strong>1. <code>src/func/generation_safe_func.py</code> に既存バグがある</strong></p>
+    <ul>
+      <li>L78: <code>args.max_</code> は未定義引数(<code>--max_dataset_num</code> の書き間違いと思われる) → <code>AttributeError</code></li>
+      <li>L156 / L166: <code>MACHINE_ID</code> が未定義(<code>args.machine_id</code> であるべき) → <code>NameError</code></li>
+    </ul>
+    <p>このため SAFE の beam 生成は現状そもそも完走できない。今回の変更(wrapper 側のみ)とは
+      独立だが、Step 3 の効果を実機確認するには先にこの修正が必要。修正するか指示がほしい。</p>
+  </div>
+  <div class="warn">
+    <p><strong>2. <code>gen_rffmg.py</code> の <code>dataset_dir</code> が実データレイアウトとずれている</strong></p>
+    <ul>
+      <li>コード: <code>data/rffmg/{frag_method}/{additional_path}</code></li>
+      <li>実態: <code>data/rffmg/{frag_method}/{5,10}times_sampling/{additional_path}</code></li>
+    </ul>
+    <p><code>data/rffmg/rc_cms/normal</code> は存在しない。これも今回のスコープ外。</p>
+  </div>
+  <p>
+    <strong>3. バックエンド横断の比較について</strong>: <code>elapsed_sec</code> はモデルロードや
+    外部CLIの起動を含むプロセス全体時間なので、t5chem と GPT2/SAFE の厳密な推論速度比較には向かない。
+    分子単位・バッチ単位の内部計測が必要になったら、<code>generation_*_func.py</code> 側に
+    <code>elapsed_sec</code> 列を追加する拡張が可能(下流の評価コードは列を名前で選択しているため、
+    列追加で壊れないことは確認済み)。ただし t5chem は外部CLIのため同じ計測はできず、
+    バックエンド間で意味の異なる数値になる点に注意。
+  </p>
+</section>
+</body>
+</html>

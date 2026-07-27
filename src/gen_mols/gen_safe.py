@@ -1,8 +1,8 @@
-import os
-import subprocess
-import itertools
 import argparse
+from pathlib import Path
+
 from func.utility import BASEPATH
+from func.generation_time import run_and_record_time
 
 if __name__=='__main__':
     
@@ -51,6 +51,24 @@ if __name__=='__main__':
         "--machine_id", str(args.machine_id),
         "--total_machines", str(args.total_machines)
     ]
-    subprocess.run(cmd, check=True)
+    json_path = run_and_record_time(
+        cmd,
+        Path(output_dir),
+        n_samples=args.n_samples,
+        params={
+            "backend": "safe_gpt",
+            "model_ver": model_ver,
+            "frag_method": frag_method,
+            "num_beams": args.num_beams,
+            "max_length": args.max_length,
+            "model_path": model_path,
+            "machine_id": args.machine_id,
+            "total_machines": args.total_machines,
+            "random_seed": args.random_seed,
+        },
+        record_name=f"generation_time_{args.machine_id}.json",
+        predictions_pattern=f"predictions_{args.machine_id}.csv",
+    )
+    print(f"Saved generation time to: {json_path}")
         
     

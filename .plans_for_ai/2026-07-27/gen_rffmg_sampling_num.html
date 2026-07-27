@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Plan: gen_rffmg を {5,10}times_sampling に対応させる (2026-07-27)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; }
+  h1 { border-bottom: 2px solid #333; }
+  .step { margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+  pre { background: #f4f4f4; padding: 0.8em; border-radius: 4px; overflow-x: auto; }
+  table { border-collapse: collapse; margin: 1em 0; }
+  th, td { border: 1px solid #ccc; padding: 0.4em 0.8em; text-align: left; }
+  th { background: #f0f0f0; }
+  .warn { background: #fff8e1; border-left: 4px solid #e6a700; padding: 0.8em 1em; margin: 1em 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plan: gen_rffmg を {5,10}times_sampling に対応させる</h1>
+  <p class="meta">Date: 2026-07-27 | Status: approved</p>
+</header>
+
+<section id="overview">
+  <h2>概要</h2>
+  <p>
+    <code>src/gen_mols/gen_rffmg.py</code> のパスは sampling_num 導入前のままで、
+    実データレイアウトとずれている。
+  </p>
+  <table>
+    <tr><th></th><th>現在のコード</th><th>ディスク上の実態</th></tr>
+    <tr>
+      <td>data</td>
+      <td><code>data/rffmg/{frag}/{additional}</code></td>
+      <td><code>data/rffmg/{frag}/{N}times_sampling/{additional}</code></td>
+    </tr>
+  </table>
+  <p>
+    そのため <code>data/rffmg/rc_cms/normal</code> は存在せず、既定引数のままでは生成が走らない。
+    学習側(<code>src/train_model/run_rffmg.sh</code>, <code>src/train_model/train_gpt.py</code>)と
+    データ生成側(<code>src/make_datasets.py</code>, <code>src/gen_frags/rffmg_frags.py</code>)は既に
+    <code>--sampling_num</code> / <code>{N}times_sampling</code> に対応済みなので、
+    <strong>生成側だけが取り残されている</strong>状態。この既存の規約にそのまま合わせる。
+  </p>
+
+  <h3>既存の規約(踏襲するもの)</h3>
+  <ul>
+    <li>CLI 引数名: <code>--sampling_num</code> (<code>int</code>)</li>
+    <li>パス片: <code>f'{args.sampling_num}times_sampling'</code></li>
+    <li>学習の出力先: <code>models/rffmg/{model_name}/{mode}/{frag}/{sampling}</code>
+      (<code>run_rffmg.sh:19</code>, <code>train_gpt.py:159</code>)</li>
+    <li>shell 変数: <code>SAMPLING_NUM=10 # 5 or 10 (uses the data/rffmg/&lt;frag&gt;/&lt;N&gt;times_sampling slice)</code>
+      (<code>run_rffmg.sh:14</code>)</li>
+  </ul>
+
+  <h3>既定値と選択肢</h3>
+  <p>
+    <code>--sampling_num</code> は <code>type=int, choices=[5, 10], default=10</code> とする
+    (<code>train_gpt.py:107-108</code> と同じ。<code>run_rffmg.sh</code> の
+    <code>SAMPLING_NUM=10</code> とも揃う)。
+  </p>
+
+  <h3>3つのパスすべてに sampling を入れる</h3>
+  <p>
+    <code>dataset_dir</code> だけを直すと、10times で学習したモデルに 5times のデータを
+    食わせるといった取り違えが起きるため、<code>model_path</code> と
+    <code>output_dir</code> にも入れる。
+  </p>
+  <table>
+    <tr><th></th><th>変更前</th><th>変更後</th></tr>
+    <tr>
+      <td><code>dataset_dir</code></td>
+      <td><code>data/rffmg/{frag}/{additional}</code></td>
+      <td><code>data/rffmg/{frag}/{sampling}/{additional}</code></td>
+    </tr>
+    <tr>
+      <td><code>model_path</code></td>
+      <td><code>models/rffmg/{model}/{ver}/{frag}/best_model</code></td>
+      <td><code>models/rffmg/{model}/{ver}/{frag}/{sampling}/best_model</code></td>
+    </tr>
+    <tr>
+      <td><code>output_dir</code></td>
+      <td><code>results/rffmg/{model}/{ver}/{frag}/{gen}/{additional}</code></td>
+      <td><code>results/rffmg/{model}/{ver}/{frag}/{sampling}/{gen}/{additional}</code></td>
+    </tr>
+  </table>
+  <p><code>model_path</code> / <code>output_dir</code> の階層位置は学習側(<code>{frag}/{sampling}</code>)に合わせる。</p>
+</section>
+
+<section id="plan">
+  <h2>実装計画</h2>
+  <ol>
+    <article class="step" data-step="1">
+      <li>
+        <h3>Step 1: <code>gen_rffmg.py</code> に <code>--sampling_num</code> を追加し、3つのパスに反映する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_mols/gen_rffmg.py</code></p>
+        <p><strong>変更内容:</strong></p>
+        <ul>
+          <li>Model parameters のグループに引数を追加(<code>--model_ver</code> の直後):</li>
+        </ul>
+<pre><code>parser.add_argument('--sampling_num', type=int, default=10, choices=[5, 10],
+                    help='Fragment-sampling multiplier N, selecting the data/rffmg/&lt;frag&gt;/&lt;N&gt;times_sampling slice (default: 10)')</code></pre>
+        <ul>
+          <li>既存の変数取り出しブロックに <code>sampling = f'{args.sampling_num}times_sampling'</code> を追加。</li>
+          <li><code>model_path</code> / <code>output_dir</code> / <code>dataset_dir</code> を上表の「変更後」に差し替える。</li>
+          <li><code>run_and_record_time</code> の <code>params</code> に
+            <code>"sampling_num": args.sampling_num</code> を追加し、生成時間の記録から
+            どのスライスを使ったか分かるようにする。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="2">
+      <li>
+        <h3>Step 2: <code>gen_rffmg.sh</code> に <code>SAMPLING_NUM</code> を追加する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_mols/gen_rffmg.sh</code></p>
+        <p><strong>変更内容:</strong> 他の設定変数と同じ形式で1行追加
+          (コメント文言は <code>run_rffmg.sh:14</code> と揃える)。
+          <code>python</code> 呼び出しに <code>--sampling_num ${SAMPLING_NUM}</code> を追加する。
+          引数の並びは他と同様、モデル系(<code>--model_name</code> … <code>--model_ver</code>)の後・
+          生成系(<code>--additional_path</code> 以降)の前に置く。</p>
+<pre><code>SAMPLING_NUM=10 # 5 or 10 (uses the data/rffmg/&lt;frag&gt;/&lt;N&gt;times_sampling slice)</code></pre>
+        <p><strong>依存関係:</strong> Step 1 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="3">
+      <li>
+        <h3>Step 3: 動作確認</h3>
+        <p><strong>対象ファイル:</strong> 変更なし(確認のみ)</p>
+        <ul>
+          <li><code>python -m py_compile src/gen_mols/gen_rffmg.py</code></li>
+          <li><code>python src/gen_mols/gen_rffmg.py --help</code> で <code>--sampling_num</code> が
+            <code>{5,10}</code> 付きで出ること。</li>
+          <li><code>bash -n src/gen_mols/gen_rffmg.sh</code> で shell 構文チェック。</li>
+          <li>5 / 10 それぞれで組み立てられる <code>dataset_dir</code> が実在することを確認する
+            (<code>--frag_method brics</code> は 5・10 とも <code>normal</code> が存在。
+            <code>rc_cms</code> は 5 のみ存在＝下記 Notes 参照)。</li>
+          <li>GPU 生成そのものは重いので走らせない。</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 2 の後</p>
+      </li>
+    </article>
+  </ol>
+</section>
+
+<section id="notes">
+  <h2>判断が必要な点</h2>
+  <div class="warn">
+    <p><strong>1. 既存の学習済みモデルは新しい <code>model_path</code> では見つからない</strong></p>
+    <ul>
+      <li>ディスク上の実態: <code>models/rffmg/{t5chem,gpt}/{finetuning,from_scratch}/{brics,rc_cms}/best_model</code>
+        (sampling の階層なし＝sampling_num 導入前に学習したもの)</li>
+      <li>変更後のコードが探す場所: <code>.../{frag}/{sampling}/best_model</code></li>
+      <li>現在の <code>run_rffmg.sh</code> は <code>models/rffmg/{model}/{mode}/{frag}/{sampling}</code> に
+        出力するので、<strong>今後学習するモデルは新しい場所に入る</strong>。既存モデルで生成したい場合は
+        手動で移動(例: <code>mv .../brics/best_model .../brics/10times_sampling/</code>)が必要。</li>
+      <li>見つからない場合は <code>FileNotFoundError</code> で明示的に落ちるため、
+        黙って誤ったモデルを読むことはない。</li>
+    </ul>
+  </div>
+  <div class="warn">
+    <p><strong>2. <code>rc_cms</code> の 10times_sampling はまだ空</strong></p>
+    <ul>
+      <li><code>data/rffmg/rc_cms/10times_sampling/</code> には <code>full_dataset.csv</code> のみで、
+        <code>normal/</code> 等の分割データがない
+        (<code>make_datasets.py --frag_method rc_cms --sampling_num 10</code> が未実行)。</li>
+      <li><code>brics</code> は 5・10 とも揃っている。既定の <code>--sampling_num 10</code> で
+        <code>rc_cms</code> を生成しようとすると t5chem 側がデータを見つけられず失敗する。</li>
+    </ul>
+  </div>
+  <p>
+    <strong>3. 既存の結果は上書きされない</strong>:
+    変更後は <code>results/rffmg/{model}/{ver}/{frag}/{sampling}/{gen}/{additional}/</code> に
+    出力されるため、既存の
+    <code>results/rffmg/t5chem/finetuning/{frag}/beam/{additional}/predictions.csv</code> は
+    そのまま残る。ただし旧パスを見ている下流スクリプトは新しい結果を拾わない。
+  </p>
+  <p>
+    <strong>4. スコープ外</strong>: <code>src/evaluation.py:46-47</code> も
+    <code>data/rffmg/{frag_method}/{additional_path}</code> と sampling なしのパスを組み立てており、
+    同じずれを抱えている。今回の指示は <code>gen_rffmg.py</code> / <code>gen_rffmg.sh</code> のみなので触らない。
+  </p>
+</section>
+</body>
+</html>
