@@ -92,7 +92,6 @@ if __name__=='__main__':
     
     # rffmg, for debug
     for data, name in zip([rffmg_tr.head(10000), rffmg_val.head(10000), rffmg_te.head(10000)], ["train", "val", "test"]):
-        add_path  = '' if name != 'test' else 'normal'
         reactions = [reaction.split('>>') for reaction in data['sentence']]
         source = "\n".join([reaction[0] for reaction in reactions]) + "\n"
         target = "\n".join([reaction[1] for reaction in reactions]) + "\n"
