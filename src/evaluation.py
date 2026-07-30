@@ -11,26 +11,35 @@ if __name__ =='__main__':
     
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('--model_name', type=str, choices=['t5chem', 'safe_gpt', 'gpt'],
-                        help='Model name: t5chem / safe_gpt / gpt (RFFMG-GPT) (default: t5chem)')
+    parser.add_argument('--model_name', type=str, choices=['t5chem', 'safe_gpt', 'gpt', 'promptsmiles', 'fraggpt'],
+                        help='Model name: t5chem / safe_gpt / gpt (RFFMG-GPT) / promptsmiles / fraggpt (default: t5chem)')
     parser.add_argument('--model_ver', type=str, default='finetuning', choices=['finetuning', 'pretrained', 'from_scratch'],
                         help='Phase name (default: finetuning)')
     parser.add_argument('--frag_method', type=str, default='rc_cms', choices=['rc_cms', 'brics'],
                         help='Fragmentation method (default: rc_cms)')
     parser.add_argument('--additional_path', type=str, default='normal', choices=['normal', 'dup_frags', 'frag_num', 'frag_order', 'attach_point_num'],
                         help='Additional path (default: normal)')
+    parser.add_argument('--gen_method', type=str, default=None, choices=['beam', 'sampling'],
+                        help='Decoding scheme segment of the results path; defaults to the one the model was generated with')
     args = parser.parse_args()
     
     # Setting
     model_name  = args.model_name
-    # RFFMG-GPT (model_name='gpt') keeps its own results path (str_name/model_dir) but
-    # reuses the T5Chem-format reader in evaluation_func (arc_name).
+    # RFFMG-GPT (model_name='gpt') and PromptSMILES keep their own results path
+    # (str_name/model_dir/gen_method) but reuse the T5Chem-format reader in evaluation_func
+    # (arc_name). The default decoding scheme is beam search, except for PromptSMILES which is
+    # published with multinomial sampling; --gen_method overrides it when both schemes were run.
     if model_name == 'safe_gpt':
-        str_name, model_dir, arc_name = 'safe', 'gpt', 'safe_gpt'
+        str_name, model_dir, arc_name, default_gen_method = 'safe', 'gpt', 'safe_gpt', 'beam'
     elif model_name == 'gpt':
-        str_name, model_dir, arc_name = 'rffmg', 'gpt', 't5chem'
+        str_name, model_dir, arc_name, default_gen_method = 'rffmg', 'gpt', 't5chem', 'beam'
+    elif model_name == 'promptsmiles':
+        str_name, model_dir, arc_name, default_gen_method = 'promptsmiles', 'gpt', 't5chem', 'sampling'
+    elif model_name == 'fraggpt':
+        str_name, model_dir, arc_name, default_gen_method = 'fraggpt', 'gpt', 't5chem', 'beam'
     else:  # t5chem
-        str_name, model_dir, arc_name = 'rffmg', 't5chem', 't5chem'
+        str_name, model_dir, arc_name, default_gen_method = 'rffmg', 't5chem', 't5chem', 'beam'
+    gen_method  = args.gen_method or default_gen_method
     model_ver   = args.model_ver
     frag_method = args.frag_method
     additional_path = args.additional_path
@@ -42,6 +51,17 @@ if __name__ =='__main__':
         testInputfile = None
         additional_path = 'normal'
         
+    elif model_name == 'promptsmiles':
+        # Plain-SMILES corpus (one molecule per line) and the prompts written by gen_promptsmiles.py.
+        tr_file_name  = f'{BASEPATH}/data/promptsmiles/{frag_method}/normal/train.smi'
+        testInputfile = f'{BASEPATH}/data/promptsmiles/{frag_method}/{additional_path}/test.source'
+
+    elif model_name == 'fraggpt':
+        # Molecules behind the FU-SMILES corpus and the prompts written by
+        # generation_fraggpt_func.py (the shared test split, with unlabeled `*`).
+        tr_file_name  = f'{BASEPATH}/data/fraggpt/{frag_method}/normal/train.target'
+        testInputfile = f'{BASEPATH}/data/fraggpt/{frag_method}/{additional_path}/test.source'
+
     else:  # t5chem or gpt (RFFMG fragment representation)
         tr_file_name  = f'{BASEPATH}/data/rffmg/{frag_method}/normal/train.target'
         testInputfile = f'{BASEPATH}/data/rffmg/{frag_method}/{additional_path}/test.source'
@@ -56,11 +76,11 @@ if __name__ =='__main__':
         trPhysicprop_df.to_csv(f'{BASEPATH}/results/train_physic_property.csv')
         
     
-    outfd = f'{BASEPATH}/results/{str_name}/{model_dir}/{model_ver}/{frag_method}/beam/{additional_path}'
+    outfd = f'{BASEPATH}/results/{str_name}/{model_dir}/{model_ver}/{frag_method}/{gen_method}/{additional_path}'
 
     ## Calculate physical property
     # Define file path
-    file_name = f'{BASEPATH}/results/{str_name}/{model_dir}/{model_ver}/{frag_method}/beam/{additional_path}/predictions.csv'
+    file_name = f'{outfd}/predictions.csv'
     
     # Evaluation gen mols
     genmols = loadGenSmiles(arc_name, file_name, testInputfile)
@@ -75,7 +95,7 @@ if __name__ =='__main__':
 
     # Evaluation metrics only for fragments used in frag_order (to compare the performance between unshuffled and shuffled fragment orders)
     if additional_path == 'frag_order':
-        outfd  = f'{BASEPATH}/results/{str_name}/{model_dir}/{model_ver}/{frag_method}/beam'
+        outfd  = f'{BASEPATH}/results/{str_name}/{model_dir}/{model_ver}/{frag_method}/{gen_method}'
         datafd = f'{BASEPATH}/data/{str_name}/{frag_method}/'
         no_shuffle_df = pd.read_csv(f'{outfd}/normal/curated_data.tsv', sep='\t', index_col=0)
         random_get_id = pickle_load(f'{datafd}/frag_order/random_get_ids.pkl')
