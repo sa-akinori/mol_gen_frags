@@ -1,0 +1,4 @@
+rdkit==2025.3.6
+transformers==4.45.2
+datasets==4.8.2
+pandas==3.0.1
