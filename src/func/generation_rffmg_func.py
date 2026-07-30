@@ -17,6 +17,7 @@ from pathlib import Path
 import pandas as pd
 import torch
 from transformers import AutoTokenizer, GPT2LMHeadModel, set_seed
+from tqdm import tqdm
 
 SEPARATOR = ">>"
 
@@ -83,7 +84,7 @@ def main() -> None:
     targets = read_lines(Path(args.target_file))
 
     predictions: list[list[str]] = []
-    for start in range(0, len(sources), args.batch_size):
+    for start in tqdm(range(0, len(sources), args.batch_size), desc='prediction'):
         batch_sources = sources[start:start + args.batch_size]
 
         # Build left-padded ``<bos> source ">>"`` prompts.
