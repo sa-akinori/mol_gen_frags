@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Plan: FragGPT をベースラインモデルとして追加 (2026-07-29)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; }
+  h1 { border-bottom: 2px solid #333; }
+  h2 { border-bottom: 1px solid #ccc; margin-top: 2em; }
+  .step { margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+  table { border-collapse: collapse; margin: 1em 0; width: 100%; }
+  th, td { border: 1px solid #ddd; padding: 0.4em 0.7em; text-align: left; font-size: 0.95em; }
+  th { background: #f4f4f4; }
+  .warn { background: #fff8e1; border-left: 4px solid #f0ad4e; padding: 0.8em 1em; margin: 1em 0; }
+  .note { background: #eef6ff; border-left: 4px solid #4a90d9; padding: 0.8em 1em; margin: 1em 0; }
+  ol { padding-left: 1.2em; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plan: FragGPT をベースラインモデルとして追加</h1>
+  <p class="meta">Date: 2026-07-29 | Status: pending-approval</p>
+</header>
+
+<section id="overview">
+  <h2>概要</h2>
+  <p>FragGPT (Yue et al., <em>Chem. Sci.</em> 2024, DOI: 10.1039/d4sc03744h) をベースラインとして追加し、
+  本研究の比較対象（RFFMG / SAFE / PromptSMILES）に並べる。</p>
+
+  <h3>調査の結論（設計の根拠）</h3>
+  <p>論文本文には推論時のプロンプト仕様が書かれていないため、本家実装
+  (<code>https://github.com/pengbingxin/FragGPT-Interface</code>) を取得して確定させた。</p>
+  <table>
+    <tr><th>項目</th><th>本家実装の実際</th></tr>
+    <tr><td>表現</td><td>BRICS 断片 + 対になった <code>[i*]</code> ラベル（FU-SMILES）</td></tr>
+    <tr><td>区切り</td><td><code>&lt;sep&gt;</code>（本家独自 tokenizer の1トークン）</td></tr>
+    <tr><td>学習</td><td>FU-SMILES 上の<strong>無条件言語モデル</strong>。条件付けなし</td></tr>
+    <tr><td>拡張</td><td>①番号 1..n のランダム置換 ②断片順のシャッフル</td></tr>
+    <tr><td>推論プロンプト</td><td><code>sep.join(与断片) + sep</code>（末尾の区切りが「次の断片を書け」の合図）</td></tr>
+    <tr><td>番号の付与</td><td>未対の <code>*</code> に 1..k を新規付与、既存の対ラベルは +k シフト</td></tr>
+    <tr><td>組立</td><td><code>combine_all_fragmens</code>: <code>[k*]</code> 同士を照合して結合、未消化なら <code>fail</code></td></tr>
+    <tr><td>サンプリング</td><td>top-p 0.96 / temperature 1.0</td></tr>
+  </table>
+
+  <h3>本プロジェクトでの設計方針（ユーザー決定事項）</h3>
+  <table>
+    <tr><th>論点</th><th>決定</th><th>理由</th></tr>
+    <tr><td>ベースモデル</td><td><code>entropy/gpt2_zinc_87m</code>（RFFMG-GPT と同一）</td><td>ユーザー指示</td></tr>
+    <tr><td>区切り文字</td><td><strong><code>.</code></strong></td><td>vocab 2707 を変更せず RFFMG-GPT と完全に同一のモデルを保てる。<code>&lt;sep&gt;</code> は <code>resize_token_embeddings</code> が必要</td></tr>
+    <tr><td>推論入力</td><td><strong>SAFE の test split の <code>pass_fragments</code></strong></td><td>SAFE・PromptSMILES と同一列。brics/rc_cms とも結合点が保たれている</td></tr>
+    <tr><td>結合点ラベル</td><td><strong>open のみ</strong>（与断片の <code>*</code> に別々の新規番号）</td><td>本家の手順をそのまま適用した結果と一致。paired 版は実装しない</td></tr>
+    <tr><td>デコード</td><td><strong>beam search</strong>（num_beams=50 / n_samples=50）</td><td>RFFMG・SAFE と同条件</td></tr>
+    <tr><td>frag_method</td><td><strong>brics・rc_cms 両方</strong></td><td>既存手法と同じマトリクス</td></tr>
+    <tr><td>mode</td><td><strong>finetuning・from_scratch 両方</strong></td><td>既存手法と同じマトリクス</td></tr>
+    <tr><td>ハイパラ</td><td>LR 1e-4 / 50ep / batch 32 / warmup 10000 / eval・save 5000 / patience 15 / seed 42 / max_length 256</td><td>既存3手法と統一</td></tr>
+    <tr><td>conda 環境</td><td><strong><code>env_fraggpt</code>（新規）</strong></td><td>手法ごとに requirements + 専用 env という既存の慣習に合わせる。また学習は <code>t5chem</code>（<code>datasets</code> なし）・生成は <code>safe</code>（<code>datasets</code> あり）と環境が分裂するのを避け、学習から生成まで1環境で完結させる。<strong>環境の作成はユーザーが行う</strong></td></tr>
+  </table>
+
+  <h3>実測にもとづく事実（実装の前提）</h3>
+  <ol>
+    <li><strong>tokenizer</strong>: <code>entropy/gpt2_zinc_87m</code> は <code>[1*]</code>〜<code>[18*]</code> を含む FU-SMILES を
+      往復一致率 100% / unk 0 で扱える。トークン長は最大 236 &lt; <code>max_length=256</code>。</li>
+    <li><strong>区切り文字 <code>.</code> の安全性</strong>: brics 断片 1,239,697 個を検査し、内部に <code>.</code> を持つ断片は 0 件。</li>
+    <li><strong>学習コーパスは既存</strong>: <code>data/rffmg/{frag}/5times_sampling/full_dataset.csv</code> の
+      <strong><code>full_fragments</code> 列がそのまま FU-SMILES</strong>（<code>BRICSFragmentize</code> が
+      <code>dummyLabels=[(i+1,i+1)]</code> を付与）。フラグメント生成スクリプトの新規作成は不要。</li>
+    <li><strong>組立の検証</strong>: <code>[i*]</code> 照合による組立を実装して検証した。
+      <strong>ダミー原子が持っていた結合次数を再現する必要がある</strong>（単結合固定だと二重結合の切断箇所で壊れる）。
+      <table>
+        <tr><th></th><th>立体無視</th><th>立体込み</th></tr>
+        <tr><td>brics</td><td>100.0%</td><td>86.1%</td></tr>
+        <tr><td>rc_cms</td><td>100.0%</td><td>88.9%</td></tr>
+      </table>
+      立体が落ちるのは二重結合を切った箇所の E/Z が復元できないため。SAFE と同種の制約
+      （<code>src/gen_frags/safe_frags.py</code> にも同じ断り書きがある）。</li>
+    <li><strong>行対応</strong>: SAFE の test split は RFFMG 5times の test と行数・target とも完全一致。
+      <table>
+        <tr><th></th><th>train</th><th>val</th><th>test</th><th>固有分子</th></tr>
+        <tr><td>brics</td><td>1,714,298</td><td>45,203</td><td>82,441</td><td>20,000</td></tr>
+        <tr><td>rc_cms</td><td>6,648,549</td><td>175,488</td><td>90,974</td><td>20,000</td></tr>
+      </table>
+      → FragGPT・SAFE・PromptSMILES・RFFMG(5times) を<strong>同一行で直接比較</strong>できる。
+      <code>sampling_num</code> の軸は不要なので、データ配置は SAFE・PromptSMILES に揃えて
+      <code>data/fraggpt/{frag}/normal/</code> とする。</li>
+  </ol>
+
+  <h3>学習データ量の比較（1分子あたりの系列数）</h3>
+  <table>
+    <tr><th>モデル</th><th>系列/分子</th><th>train 系列数(brics)</th></tr>
+    <tr><td>RFFMG</td><td>5 or 10</td><td>—</td></tr>
+    <tr><td>SAFE</td><td>5.51</td><td>1,714,298</td></tr>
+    <tr><td><strong>FragGPT（本計画）</strong></td><td><strong>brics 1.0 / rc_cms 3.75</strong></td><td><strong>1,714,298</strong>（SAFE と同数）</td></tr>
+    <tr><td>PromptSMILES</td><td>1</td><td>1,717,900</td></tr>
+  </table>
+  <p><code>full_fragments</code> を <code>drop_duplicates</code> した件数は SAFE の <code>full_safe</code> の件数と一致するため、
+  FragGPT と SAFE は<strong>同一のデータ量</strong>で学習される。</p>
+
+  <div class="warn">
+    <h3>top-k accuracy にのみ効く FragGPT の性質</h3>
+    <p><strong>生成そのものは正常に行われる。</strong> 断片を与えれば分子が生成され、生成分子は与断片をすべて含む。
+    validity / uniqueness / novelty / フラグメント包含率にはいずれも影響しない。
+    影響を受けるのは<strong>正解分子との完全一致（top-k accuracy）だけ</strong>である。</p>
+    <p>理由は次のとおり。FU-SMILES は「同じ番号が2回現れたら結合」という書き方なので、
+    与断片同士を直接結合させるには <code>[1*][2*]</code>（ダミー2原子のみ）という断片が必要になるが、
+    これは BRICS 分解では決して生じないため学習分布に存在しない。
+    つまり FragGPT は与断片の間に必ず生成断片を1つ以上挟む。</p>
+    <p>brics の test 行のうち <strong>82.5% は正解分子の中で与断片同士が直結している</strong>
+    （断片2個以上の行に限れば 84.7%）。それらの行では、生成された50個の分子のいずれも正解分子と一致しない。
+    したがって <strong>top-k accuracy の上限が 17.5% になる</strong>。</p>
+    <p>これは実装の都合ではなく手法自体の性質なので、そのまま評価結果として報告する（ユーザー決定）。
+    必要なら直結を含まない部分集合での再集計は後から追加できる。</p>
+    <p>比較のための実測（既存の SAFE 生成結果 <code>results/safe_gpt/trained/safe/brics/beam/normal</code>）:</p>
+    <table>
+      <tr><th></th><th>完全一致率</th></tr>
+      <tr><td>与断片同士が直結している行</td><td>0.16%（29 / 18,101）</td></tr>
+      <tr><td>直結していない行</td><td>1.08%（10 / 927）</td></tr>
+    </table>
+    <p>SAFE も同じ状況で約7倍のペナルティを受けるが、厳密にゼロではない。
+    一方 FragGPT は該当行で厳密に 0 になる。RFFMG は分子を直接 SMILES として生成するため
+    この制約を受けない。</p>
+  </div>
+</section>
+
+<section id="naming">
+  <h2>命名規則（監査のうえ確定）</h2>
+  <p>既存ファイルを監査し、以下の規則に揃える。</p>
+  <table>
+    <tr><th>階層</th><th>規則</th><th>既存の例</th><th>FragGPT</th></tr>
+    <tr><td><code>src/train_model/train_*.py</code></td><td><strong>手法名のみ</strong></td><td><code>train_promptsmiles.py</code>（Step 0 で改名）</td><td><code>train_fraggpt.py</code></td></tr>
+    <tr><td><code>src/train_model/run_*.sh</code></td><td>手法名のみ</td><td><code>run_rffmg.sh</code> / <code>run_safe.sh</code> / <code>run_promptsmiles.sh</code></td><td><code>run_fraggpt.sh</code></td></tr>
+    <tr><td><code>src/gen_mols/gen_*.py</code> / <code>.sh</code></td><td>手法名のみ</td><td><code>gen_rffmg.py</code> / <code>gen_safe.py</code> / <code>gen_promptsmiles.py</code></td><td><code>gen_fraggpt.py</code></td></tr>
+    <tr><td><code>src/func/generation_*_func.py</code></td><td>手法名 + <code>_func</code></td><td><code>generation_rffmg_func.py</code> / <code>generation_safe_func.py</code></td><td><code>generation_fraggpt_func.py</code></td></tr>
+    <tr><td><code>src/func/fragment_for_*.py</code></td><td>手法固有の表現変換</td><td><code>fragment_for_safe.py</code></td><td><code>fragment_for_fraggpt.py</code></td></tr>
+    <tr><td><code>data/{手法}/{frag}/normal/</code></td><td>手法名ディレクトリ</td><td><code>data/safe/...</code> / <code>data/promptsmiles/...</code></td><td><code>data/fraggpt/...</code></td></tr>
+    <tr><td>学習テキスト</td><td><code>.smi</code></td><td><code>data/promptsmiles/.../train.smi</code></td><td><code>train.smi</code> / <code>val.smi</code></td></tr>
+    <tr><td>分子</td><td><code>.target</code></td><td><code>data/rffmg/.../train.target</code> / <code>test.target</code></td><td><code>train.target</code> / <code>test.target</code></td></tr>
+    <tr><td>与断片</td><td><code>.source</code></td><td><code>data/rffmg/.../test.source</code></td><td><code>test.source</code></td></tr>
+  </table>
+  <p><code>src/train_model/train_gpt.py</code>（RFFMG-GPT）は改名しない。
+  <code>run_rffmg.sh</code> が <code>t5chem</code> と <code>gpt</code> の2バックエンドを切り替える構造で、
+  このファイルは「RFFMG の GPT バックエンド」を指すため、アーキテクチャ名で正しい。</p>
+</section>
+
+<section id="plan">
+  <h2>実装計画</h2>
+  <ol>
+    <article class="step" data-step="0">
+      <li>
+        <h3>Step 0: 既存 PromptSMILES 学習スクリプトの改名（命名規則の是正）</h3>
+        <p><strong>対象ファイル:</strong> <code>src/train_model/train_promptsmiles_gpt.py</code> →
+          <code>src/train_model/train_promptsmiles.py</code>（改名）</p>
+        <p><strong>変更内容:</strong> <code>gen_promptsmiles.py</code> / <code>run_promptsmiles.sh</code> が
+          手法名のみなのに学習スクリプトだけ <code>_gpt</code> が付いており不整合なので是正する。</p>
+        <ul>
+          <li>ファイルを <code>git mv</code> で改名する（履歴を保つ）</li>
+          <li>参照元 <code>src/train_model/run_promptsmiles.sh:26</code> の
+            <code>python src/train_model/train_promptsmiles_gpt.py \</code> を新しい名前に更新する</li>
+          <li>ファイルの中身（コード）は一切変更しない</li>
+          <li>参照は上記1箇所のみであることを確認済み（<code>__pycache__</code> を除く）</li>
+          <li>過去の計画ファイル <code>.plans_for_ai/2026-07-28/add_promptsmiles_baseline.{md,html}</code> は
+            当時の記録なので<strong>変更しない</strong></li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="1">
+      <li>
+        <h3>Step 1: FU-SMILES ユーティリティの新規作成</h3>
+        <p><strong>対象ファイル:</strong> <code>src/func/fragment_for_fraggpt.py</code>（新規）<br>
+          （命名は <code>fragment_for_safe.py</code>（SAFE 表現への変換）に対応させる）</p>
+        <p><strong>変更内容:</strong> FU-SMILES の分解・番号操作・組立をまとめたモジュールを作る。</p>
+        <ul>
+          <li><code>split_fragments(fusmiles: str) -&gt; list[str]</code>: <code>.</code> 区切りで断片に分解</li>
+          <li><code>assemble_fragments(fragments: list[str]) -&gt; str | None</code>:
+            <code>[i*]</code> が2箇所に現れる番号を照合して結合し、単一成分・ダミーなしの SMILES を返す。
+            失敗（ダミー残存 / 複数成分 / sanitize 失敗 / パース失敗）は <code>None</code>。
+            <strong>ダミー原子が持っていた結合次数を再現すること</strong>（単結合固定にしない）。</li>
+          <li><code>renumber_open_attachments(fragments, rng) -&gt; list[str]</code>:
+            素の <code>*</code> に 1..k の新規番号を付与する（推論プロンプト用）。本家の手順に対応。</li>
+          <li><code>augment_fusmiles(fragments, rng) -&gt; list[str]</code>:
+            番号 1..n のランダム置換 + 断片順のシャッフル。<strong>系列数は増やさない</strong>。</li>
+          <li>すべて型ヒント + Google style docstring。RDKit の <code>MolFromSmiles</code> の None チェックを省略しない。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="2">
+      <li>
+        <h3>Step 2: make_datasets.py へ FragGPT 用コーパス出力を統合</h3>
+        <p><strong>対象ファイル:</strong> <code>src/make_datasets.py</code></p>
+        <p><strong>変更内容:</strong> 既存の <code>if args.sampling_num == 5:</code> ガード内（SAFE・PromptSMILES と同じ場所）に追加する。</p>
+        <ul>
+          <li><code>rffmg_tr</code> / <code>rffmg_val</code> の <code>full_fragments</code> を <code>drop_duplicates</code> し、
+            1行1系列で <code>data/fraggpt/{frag_method}/normal/{train,val}.smi</code> に出力
+            （FU-SMILES は <code>.</code> 区切りなので文字列としては妥当な SMILES。
+            学習テキストを <code>.smi</code> で出す PromptSMILES の慣習に合わせる）</li>
+          <li>評価の novelty 判定用に、学習分子の SMILES を
+            <code>data/fraggpt/{frag_method}/normal/train.target</code> に出力
+            （<code>.target</code> を分子とする RFFMG・<code>test.target</code> の慣習に合わせる。
+            内容は PromptSMILES の <code>train.smi</code> と同一だが、モジュール間依存を作らないため独立に書き出す）</li>
+          <li>既存に倣い <code>debug/</code>（先頭10000行）も出力</li>
+          <li>件数を標準出力に記録</li>
+          <li><strong>test は出力しない</strong>（推論時に SAFE の test split を読むため）</li>
+          <li>新規の分割ロジックは追加しない（既存の <code>tr_smiles</code>/<code>val_smiles</code> と
+            <code>rffmg_tr</code>/<code>rffmg_val</code> の再利用のみ）</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし（Step 1 と並行可）</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="3">
+      <li>
+        <h3>Step 3: 学習スクリプト</h3>
+        <p><strong>対象ファイル:</strong> <code>src/train_model/train_fraggpt.py</code>（新規）<br>
+          （命名は <code>gen_fraggpt.py</code> / <code>run_fraggpt.sh</code> と同じく<strong>手法名のみ</strong>。Step 0 で揃えた規則に従う）</p>
+        <p><strong>変更内容:</strong> <code>train_promptsmiles.py</code> の構成・コードスタイルを踏襲した<strong>無条件言語モデル</strong>の学習。</p>
+        <ul>
+          <li>Dataset: <code>&lt;bos&gt; frag1.frag2....fragN &lt;eos&gt;</code>、labels は全トークン（<code>-100</code> マスクなし）。
+            <code>max_length</code> 超過は切り詰めずに <code>ValueError</code> を送出（既存2スクリプトと同じ方針）</li>
+          <li>拡張: <code>--augment</code>（default: <strong>True</strong>）。有効時は <code>augment_fusmiles</code> を
+            <strong>データセット構築時に1回</strong>適用する（seed 固定で再現可能、系列数は不変）。
+            エポックごとの再ランダム化は行わない（再現性を優先）。
+            default を True にする理由: 番号と断片順が任意でよいことを学習していないと、
+            推論時のプロンプト（新規番号 1..k・シャッフル順）に対応できず手法として成立しないため。</li>
+          <li><code>--frag_method {brics, rc_cms}</code> / <code>--mode {finetuning, from_scratch}</code> /
+            <code>--pretrain entropy/gpt2_zinc_87m</code></li>
+          <li>ハイパラ default は既存3手法に一致（epoch 50 / LR 1e-4 / batch 32 / warmup 10000 /
+            eval・save 5000 / save_total_limit 5 / EarlyStopping 15 / seed 42 / max_length 256）</li>
+          <li>出力: <code>models/fraggpt/gpt/{mode}/{frag_method}/</code>、<code>best_model/</code> を保存</li>
+          <li>型ヒント・Google style docstring 必須</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 1、Step 2 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="4">
+      <li>
+        <h3>Step 4: 学習実行シェルスクリプト</h3>
+        <p><strong>対象ファイル:</strong> <code>src/train_model/run_fraggpt.sh</code>（新規）</p>
+        <p><strong>変更内容:</strong> <code>run_promptsmiles.sh</code> / <code>run_rffmg.sh</code> の作法を踏襲。
+          リポジトリルートへ cd、<code>conda activate env_fraggpt</code>、<code>CUDA_VISIBLE_DEVICES=0</code>、
+          <code>WANDB_MODE=offline</code> と <code>WANDB_DIR="wandb/fraggpt/gpt/${MODE}/${FRAG_NAME}"</code> を設定して
+          <code>train_fraggpt.py</code> を実行。<code>FRAG_NAME</code> / <code>MODE</code> を上部変数で切替。</p>
+        <p><strong>依存関係:</strong> Step 3 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="5">
+      <li>
+        <h3>Step 5: 生成本体</h3>
+        <p><strong>対象ファイル:</strong> <code>src/func/generation_fraggpt_func.py</code>（新規）</p>
+        <p><strong>変更内容:</strong> 学習済み GPT2 をロードして FU-SMILES を beam search し、組立て分子にする。</p>
+        <ul>
+          <li>入力: <code>datasets.load_from_disk(f'{BASEPATH}/data/safe/{frag_method}/normal')</code> の test split。
+            正解分子 = <code>smiles</code> 列、プロンプトの元 = <code>pass_fragments</code> 列
+            （<code>gen_promptsmiles.py</code> の <code>read_test_split</code> と同一の読み方）</li>
+          <li>各行: <code>renumber_open_attachments</code> で <code>*</code> に 1..k を付与 → 断片順をシード付きでシャッフル →
+            プロンプト <code>&lt;bos&gt; frag1.frag2....fragk.</code>（末尾の <code>.</code> が「次の断片を書け」の合図）</li>
+          <li><code>model.generate(do_sample=False, num_beams=50, num_return_sequences=50, ...)</code>。
+            プロンプト以降を <code>.</code> 分割して生成断片とし、プロンプト断片と合わせて <code>assemble_fragments</code></li>
+          <li>組立に失敗した候補は空文字列にする。<strong>行は絶対に落とさない</strong>
+            （RFFMG・SAFE・PromptSMILES と行対応を維持するため。失敗は validity に正直に反映される）</li>
+          <li>出力:
+            <ul>
+              <li><code>results/fraggpt/gpt/{model_ver}/{frag_method}/beam/normal/predictions.csv</code>
+                （列 <code>target</code>, <code>prediction_1</code> .. <code>prediction_N</code>、T5Chem 形式）</li>
+              <li><code>data/fraggpt/{frag_method}/normal/test.source</code>（与断片、素の <code>*</code> 形式）</li>
+              <li><code>data/fraggpt/{frag_method}/normal/test.target</code>（正解分子）</li>
+            </ul>
+          </li>
+          <li>3ファイルの行数・行順が常に一致することを assert で担保</li>
+          <li>失敗理由別の件数（パース失敗 / ダミー残存 / 複数成分 / sanitize 失敗）を集計し、
+            標準出力と <code>LogFile</code> の両方へ出力する。<strong>例外を黙って飲み込まないこと</strong></li>
+          <li>型ヒント・Google style docstring 必須、<code>set_seed</code> で再現性を担保</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 1、Step 3 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="6">
+      <li>
+        <h3>Step 6: 生成ラッパー</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_mols/gen_fraggpt.py</code> + <code>src/gen_mols/gen_fraggpt.sh</code>（新規）</p>
+        <p><strong>変更内容:</strong> <code>gen_rffmg.py</code> / <code>gen_rffmg.sh</code> の作法を踏襲。</p>
+        <ul>
+          <li><code>func.generation_time.run_and_record_time</code> で <code>generation_fraggpt_func.py</code> を
+            subprocess 実行し、<code>generation_time.json</code> を出力（既存2手法と同じ計測方法に揃える）</li>
+          <li>引数: <code>--frag_method {brics, rc_cms}</code>, <code>--model_ver {finetuning, from_scratch}</code>,
+            <code>--n_samples 50</code>, <code>--num_beams 50</code>, <code>--batch_size</code>,
+            <code>--max_length 256</code>, <code>--random_seed 42</code></li>
+          <li>出力先: <code>results/fraggpt/gpt/{model_ver}/{frag_method}/beam/normal/</code></li>
+          <li><code>.sh</code> は既存の <code>gen_*.sh</code> と異なり、<strong>リポジトリルートへ cd して
+            <code>conda activate env_fraggpt</code> を行う</strong>（ユーザー決定）。
+            生成は <code>datasets</code> に依存するため、環境を取り違えると <code>ModuleNotFoundError</code> になる。
+            <code>run_*.sh</code> と同じ作法に揃えることで、どのシェルからでもそのまま実行できるようにする</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 5、Step 9 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="7">
+      <li>
+        <h3>Step 7: 評価パイプラインへの統合</h3>
+        <p><strong>対象ファイル:</strong> <code>src/evaluation.py</code></p>
+        <p><strong>変更内容:</strong></p>
+        <ul>
+          <li><code>--model_name</code> の choices に <code>fraggpt</code> を追加</li>
+          <li>分岐を追加: <code>str_name, model_dir, arc_name, gen_method = 'fraggpt', 'gpt', 't5chem', 'beam'</code></li>
+          <li><code>tr_file_name = f'{BASEPATH}/data/fraggpt/{frag_method}/normal/train.target'</code></li>
+          <li><code>testInputfile = f'{BASEPATH}/data/fraggpt/{frag_method}/{additional_path}/test.source'</code></li>
+          <li><code>outfd</code> は既存の
+            <code>results/{str_name}/{model_dir}/{model_ver}/{frag_method}/{gen_method}/{additional_path}</code>
+            のパターンにそのまま乗る（<code>sampling_num</code> 階層を持たないため既存コードの変更は不要）</li>
+          <li>validity / uniqueness / novelty / フラグメント包含率を RFFMG・SAFE と<strong>同一関数</strong>で算出する</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 6 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="8">
+      <li>
+        <h3>Step 8: 小規模検証</h3>
+        <p><strong>対象ファイル:</strong> 実行のみ（コード変更なし）</p>
+        <p><strong>変更内容:</strong> <code>debug/</code> データで以下を確認する。</p>
+        <ul>
+          <li>学習が数ステップ回ること（brics × finetuning）</li>
+          <li>生成が数百行通り、<code>predictions.csv</code> / <code>test.source</code> / <code>test.target</code> の行数が一致すること</li>
+          <li>組立成功率と失敗理由の内訳が妥当であること</li>
+          <li><code>evaluation.py --model_name fraggpt</code> が最後まで通ること</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 7 の後</p>
+      </li>
+    </article>
+    <article class="step" data-step="9">
+      <li>
+        <h3>Step 9: FragGPT 専用実行環境の追加</h3>
+        <p><strong>対象ファイル:</strong> <code>requirements/fraggpt_requirements.txt</code>（新規）</p>
+        <p><strong>背景:</strong> 実装後の検証で、<code>t5chem</code> 環境に <code>datasets</code> が無いことが判明した。
+          そのため当初想定の「<code>t5chem</code> 環境で完結」は成立せず、学習は <code>t5chem</code>・
+          生成は <code>safe</code> という環境の分裂が発生していた。また既存の3手法はいずれも
+          <code>requirements/{手法}_requirements.txt</code> + 専用 env を持っており、FragGPT だけ無い状態だった。</p>
+        <p><strong>変更内容:</strong> <code>promptsmiles_requirements.txt</code> に倣いバージョンを固定して記述する。
+          FragGPT は本家パッケージを使わず自前実装のため、手法固有のパッケージは含まれない。</p>
+        <pre><code>rdkit==2025.3.6
+transformers==4.45.2
+datasets==4.8.2
+pandas==3.0.1</code></pre>
+        <p>torch は既存2環境と同様 requirements 外で個別導入する。想定 conda 環境名は <strong><code>env_fraggpt</code></strong>。
+          <strong>環境の作成はユーザーが行う</strong>。</p>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+  </ol>
+</section>
+
+<section id="schedule">
+  <h2>実行順序と実行時間の見積もり</h2>
+  <ul>
+    <li>Step 0・1・2 は並行可（Step 0 は既存 PromptSMILES の改名のみで FragGPT 実装とは独立）。
+      Step 3 以降は順に依存する。</li>
+    <li><strong>学習の実行はユーザーが行う</strong>。本計画のスコープは実装 + 小規模検証まで。</li>
+    <li>学習は 2 frag_method × 2 mode = <strong>4本</strong>。
+      1エポックあたりの step 数は brics 約 53,600 / rc_cms 約 207,800（batch 32）。
+      <code>num_train_epochs=50</code> に到達する前に EarlyStopping（検証15回連続 = 75,000 steps 改善なし）で
+      停止する想定。GPU は既存手法と同じ <code>CUDA_VISIBLE_DEVICES=0</code>。</li>
+  </ul>
+</section>
+
+<section id="out-of-scope">
+  <h2>スコープ外（今回やらないこと）</h2>
+  <ul>
+    <li><strong>de novo 生成（MOSES ベンチマーク）</strong>: 本研究の比較軸は断片条件付き生成のため含めない。</li>
+    <li><strong>paired labeling</strong>（与断片の結合情報を与える版）: ユーザー決定により実装しない。</li>
+    <li><strong>ADMET 条件付き生成 / 強化学習</strong>: FragGPT 論文の付加機能であり、比較軸に含まれない。</li>
+    <li><strong><code>&lt;sep&gt;</code> 区切り</strong>: <code>.</code> を採用したため実装しない。</li>
+  </ul>
+</section>
+
+<section id="known-issues">
+  <h2>既存コードの既知の不整合（今回は修正しない・要確認事項）</h2>
+  <div class="note">
+    <p>FragGPT の実装とは独立に、調査中に見つかった既存の問題を記録する。
+    いずれも本計画では触れないが、別途対応するか判断が必要。</p>
+  </div>
+  <ol>
+    <li><strong><code>src/evaluation.py</code> の RFFMG パスが古い</strong>:
+      <code>data/rffmg/{frag}/normal/train.target</code> と
+      <code>data/rffmg/{frag}/{additional_path}/test.source</code> を参照しているが、
+      実際のデータは <code>data/rffmg/{frag}/{N}times_sampling/normal/</code> 配下にあり
+      <strong>存在しないパス</strong>になっている。結果パス側も <code>{N}times_sampling</code> 階層を持たないため
+      <code>gen_rffmg.py</code> の出力先と一致しない。</li>
+    <li><strong><code>src/gen_frags/safe_frags.py</code> のパスが古い</strong>:
+      <code>data/rffmg/{frag}/full_dataset.csv</code>（<code>{N}times_sampling</code> 階層なし）を読んでいる。
+      既存の <code>safe_smiles.csv</code> は 5times 由来であることを行数一致で確認済み。</li>
+    <li><strong>SAFE と RFFMG の分子分割の不一致</strong>:
+      SAFE・PromptSMILES・FragGPT は 5times の分割に固定される一方、
+      <code>run_rffmg.sh</code> は現在 <code>SAMPLING_NUM=10</code> のため、RFFMG-10times だけ別の分子分割になっている。
+      RFFMG-5times とは行単位で一致する。</li>
+    <li><strong>rc_cms における入力情報量の非対称</strong>:
+      <code>trimRonRing=True</code> の影響で、RFFMG の <code>test.source</code> は環上の結合点が H に置換されて
+      消えているが、SAFE の <code>pass_fragments</code> には残っている。したがって rc_cms では
+      SAFE・PromptSMILES・FragGPT は RFFMG より多くの結合点を受け取る。
+      これは既存の PromptSMILES ベースラインにも同じく当てはまる。</li>
+  </ol>
+</section>
+
+<section id="open-questions">
+  <h2>未確定事項</h2>
+  <p>なし。</p>
+</section>
+</body>
+</html>

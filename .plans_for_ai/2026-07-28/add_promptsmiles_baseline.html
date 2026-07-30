@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Plan: PromptSMILES をベースラインモデルとして追加 (2026-07-28)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; }
+  h1 { border-bottom: 2px solid #333; }
+  .step { margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid #ddd; padding: 0.5em; text-align: left; }
+  th { background: #f4f4f4; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plan: PromptSMILES をベースラインモデルとして追加</h1>
+  <p class="meta">Date: 2026-07-28 | Status: pending-approval</p>
+</header>
+
+<section id="overview">
+  <h2>概要</h2>
+  <p>PromptSMILES (Thomas et al., <em>J. Cheminform.</em> 2024) をベースラインモデルとして追加する。</p>
+
+  <h3>論文調査の結論（設計の根拠）</h3>
+  <ul>
+    <li>論文は<strong>事前学習済みの化学言語モデル(prior)を流用</strong>している。しかも汎用priorではなく、<strong>比較相手の手法の著者が公開したprior</strong>をそのまま使う（SAMOA比較→ChEMBL、LibINVENT/LinkINVENT比較→各著者のChEMBLデータ、GuacaMol→GuacaMol train）。つまり論文の思想は「<strong>比較相手と同じデータで学習したpriorを使って公平性を担保する</strong>」こと。</li>
+    <li>priorは<strong>プレーンSMILES</strong>で学習された decoder-only モデル（SAFE/SELFIESではない）。</li>
+    <li>同一priorを de novo / scaffold decoration / fragment linking で<strong>使い回す</strong>のが論文の売り。</li>
+    <li>論文のprior学習ハイパラ: batch 128 / LR 1e-3 / epoch 5〜10 / <strong>10-fold restricted randomization augmentation</strong>。</li>
+  </ul>
+
+  <h3>本プロジェクトでの設計方針</h3>
+  <p>上記より、<strong>本プロジェクトの既存2手法と同一条件でpriorを用意することが論文に忠実</strong>である。既存の RFFMG-GPT が既に <code>entropy/gpt2_zinc_87m</code>（ZINCのSMILESで事前学習されたGPT2 decoder）を使っているため、これを PromptSMILES の prior にも流用し、ChEMBL31 で finetuning する。</p>
+  <table>
+    <tr><th></th><th>事前学習重み</th><th>学習データ</th><th>表現・手法</th></tr>
+    <tr><td>RFFMG-GPT</td><td><code>entropy/gpt2_zinc_87m</code></td><td>ChEMBL31</td><td>フラグメント文 <code>source&gt;&gt;target</code></td></tr>
+    <tr><td>SAFE-GPT</td><td>SAFE pretrained</td><td>ChEMBL31</td><td>SAFE表現</td></tr>
+    <tr><td><strong>PromptSMILES（新規）</strong></td><td><strong><code>entropy/gpt2_zinc_87m</code></strong></td><td><strong>ChEMBL31（同一分割）</strong></td><td><strong>プレーンSMILES + 推論時プロンプト</strong></td></tr>
+  </table>
+  <p>→ <strong>事前学習重み・分子集合・ハイパラを揃え、表現／手法だけを変える</strong>という理想的な比較になる。</p>
+  <ul>
+    <li><strong>ハイパラ</strong>: 既存2手法に合わせる（LR=1e-4 / 50 epoch / batch 32 / warmup 10000 / eval・save 5000 steps / EarlyStopping patience=15 / seed 42）。論文値（LR=1e-3, epoch 5〜10）とは異なるが比較の公平性を優先する。</li>
+    <li><strong>Augmentation: 行わない（ユーザー判断）</strong>。<strong>1分子 = 1系列</strong>とし、学習データはカノニカルSMILESのみ。論文は 10-fold restricted randomization を使っているが本プロジェクトでは採用しない。理由: データ量が他手法に対して極端に多くなり、公平な比較にならないため。データ水増しのオプションは実装しない。</li>
+    <li><strong>非カノニカルSMILESへの頑健性（既知のリスクと緩和策）</strong>: PromptSMILES は結合点が末尾に来るよう SMILES を<strong>再ルート化＝非カノニカル化</strong>した文字列をプロンプトとして与える手法である。prior がカノニカルSMILESしか学習していない場合、非カノニカルなプロンプトへの尤度・生成品質が落ちる可能性がある（論文がランダム化を用いていたのはこのため）。緩和策として <strong><code>--randomize_smiles</code> フラグ（default: False = 無効）</strong> のみ実装しておく。これは<strong>データ件数を増やさず</strong>、各エポックで1分子1系列のまま表記だけをランダム化するオプションであり、有効化してもデータ量は RFFMG / SAFE と同条件のまま保たれる。デフォルトは無効なので、既定の学習挙動はカノニカルSMILESのみ。
+      <p>参考（既存手法のデータ倍率。PromptSMILES はこれらと異なり1分子1系列とする）:</p>
+      <table>
+        <tr><th>モデル</th><th>1分子あたりの行数</th><th>備考</th></tr>
+        <tr><td>SAFE</td><td>実測 5.51（9,956,758行 / 1,808,325分子, brics）</td><td>フラグメント化パターン <code>nFragmentPatterns=5</code> に由来</td></tr>
+        <tr><td>RFFMG</td><td>5 or 10</td><td><code>sampling_num</code>（<code>run_rffmg.sh</code> は現在 <code>SAMPLING_NUM=10</code>）</td></tr>
+        <tr><td><strong>PromptSMILES（本計画）</strong></td><td><strong>1</strong></td><td><strong>augmentation なし</strong></td></tr>
+      </table>
+    </li>
+    <li><strong>学習目的の違い</strong>: PromptSMILES の prior は無条件言語モデルなので <code>&lt;bos&gt; SMILES &lt;eos&gt;</code> の全トークンに loss をかける（RFFMG のようなプロンプトマスクはしない）。</li>
+    <li><strong>モード</strong>: 既存に倣い <code>finetuning</code> / <code>from_scratch</code> の両方をサポート。</li>
+  </ul>
+
+  <h3>データ分割の統合（重要）</h3>
+  <p><code>src/make_datasets.py</code> が既に <strong>SAFE と RFFMG の共通分割点</strong>になっている:</p>
+  <ul>
+    <li><code>rffmg_frags['smiles'].unique()</code> → <code>random.seed(0)</code> でシャッフル → 0.95/0.025/0.025 で <code>tr_smiles</code>/<code>val_smiles</code>/<code>te_smiles</code></li>
+    <li>同一リストを RFFMG と SAFE の両方に適用。test は <code>--test_mol_num 20000</code> でサブサンプルし両者共通。</li>
+  </ul>
+  <p>したがって PromptSMILES 用の独立コーパススクリプトは<strong>作らない</strong>。<code>make_datasets.py</code> 内の既存 <code>tr_smiles</code>/<code>val_smiles</code>/<code>te_smiles</code> をそのまま使って <code>.smi</code> を書き出す。</p>
+  <p><strong>注意</strong>: <code>unique_smiles</code> は <code>data/rffmg/{frag_method}/{N}times_sampling/full_dataset.csv</code> 由来のため<strong>分割は frag_method ごとに異なる</strong>。よって PromptSMILES の出力も SAFE と同様 <code>frag_method</code> 別ディレクトリに置く。</p>
+
+  <h3>環境</h3>
+  <p>プロジェクト規約に合わせ、<code>requirements/</code> 配下の requirements 方式で用意する（<code>safe_requirements.txt</code> / <code>t5chem_requirements.txt</code> に倣う）。</p>
+</section>
+
+<section id="plan">
+  <h2>実装計画</h2>
+  <ol>
+    <article class="step" data-step="1">
+      <li>
+        <h3>Step 1: requirements ファイルの追加</h3>
+        <p><strong>対象ファイル:</strong> <code>requirements/promptsmiles_requirements.txt</code>（新規）</p>
+        <p><strong>変更内容:</strong> 既存の requirements に倣いバージョン固定で記述。<code>promptsmiles</code>, <code>rdkit==2025.3.6</code>, <code>transformers==4.45.2</code>（torch は既存同様 requirements 外で個別導入）。想定 conda 環境名は <code>env_promptsmiles</code>。</p>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+    <article class="step" data-step="2">
+      <li>
+        <h3>Step 2: トークナイザ適合性の事前確認（小規模・先行実施）</h3>
+        <p><strong>対象ファイル:</strong> <code>src/debug_promptsmiles_tokenizer.py</code>（新規・確認用）</p>
+        <p><strong>変更内容:</strong> <code>entropy/gpt2_zinc_87m</code> の tokenizer が PromptSMILES のプロンプト（<strong>環開き・分岐が未閉のまま途中で切れた部分SMILES</strong>、および結合点 <code>*</code> を含む文字列）を破綻なくトークナイズ／デコードできるかを検証。往復一致率をログに記録。不適合なら Step 4 以降の設計を見直すため<strong>先に実施する</strong>。</p>
+        <p><strong>依存関係:</strong> Step 1 の後</p>
+      </li>
+    </article>
+    <article class="step" data-step="3">
+      <li>
+        <h3>Step 3: make_datasets.py へ PromptSMILES 用データ出力を統合</h3>
+        <p><strong>対象ファイル:</strong> <code>src/make_datasets.py</code></p>
+        <p><strong>変更内容:</strong> 既存の <code>tr_smiles</code>/<code>val_smiles</code>/<code>te_smiles</code>（SAFE・RFFMG と共通）をそのまま使い、1行1SMILES のプレーンテキストを <code>data/promptsmiles/{frag_method}/normal/{train,val,test}.smi</code> に出力。test は既存のサブサンプル後 <code>te_smiles</code> と完全一致。既存に倣い <code>debug/</code> 版（先頭10000件）も出力。<strong>新規の分割ロジックは追加しない</strong>（既存変数の再利用のみ）。件数をログ記録。</p>
+        <p><strong>依存関係:</strong> なし（Step 2 と並行可）</p>
+      </li>
+    </article>
+    <article class="step" data-step="4">
+      <li>
+        <h3>Step 4: prior 学習スクリプト</h3>
+        <p><strong>対象ファイル:</strong> <code>src/train_model/train_promptsmiles_gpt.py</code>（新規）</p>
+        <p><strong>変更内容:</strong> <code>train_gpt.py</code> の構成・コードスタイルを踏襲しつつ<strong>無条件言語モデル</strong>として学習。Dataset は <code>&lt;bos&gt; SMILES &lt;eos&gt;</code> で labels は全トークン（マスクなし）、<code>max_length</code> 超過は例外送出。<strong>augmentation は行わず1分子1系列</strong>（水増し引数は設けない）。代わりに <code>--randomize_smiles</code>（default <code>False</code>）のみ用意し、有効時は件数を変えずに表記のみランダム化。<code>--mode {finetuning, from_scratch}</code>、<code>--pretrain entropy/gpt2_zinc_87m</code>。ハイパラ default は既存2手法と一致（epoch 50 / LR 1e-4 / batch 32 / warmup 10000 / eval・save 5000 / save_total_limit 5 / EarlyStopping 15 / seed 42 / max_length 256）。出力は <code>models/promptsmiles/gpt/{mode}/{frag_method}/</code>。型ヒント・Google style docstring 必須。</p>
+        <p><strong>依存関係:</strong> Step 2, Step 3 の後</p>
+      </li>
+    </article>
+    <article class="step" data-step="5">
+      <li>
+        <h3>Step 5: 学習実行シェルスクリプト</h3>
+        <p><strong>対象ファイル:</strong> <code>src/train_model/run_promptsmiles.sh</code>（新規）</p>
+        <p><strong>変更内容:</strong> <code>run_rffmg.sh</code>/<code>run_safe.sh</code> の作法を踏襲。ルートへ cd、<code>conda activate env_promptsmiles</code>、<code>CUDA_VISIBLE_DEVICES=0</code>、<code>WANDB_MODE=offline</code> と <code>WANDB_DIR="wandb/promptsmiles/gpt/${MODE}/${FRAG_NAME}"</code> を設定して学習スクリプトを実行。<code>FRAG_NAME</code>/<code>MODE</code> を上部変数で切替。</p>
+        <p><strong>依存関係:</strong> Step 4 の後</p>
+      </li>
+    </article>
+    <article class="step" data-step="6">
+      <li>
+        <h3>Step 6: 生成スクリプト（scaffold decoration / fragment linking）</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_mols/gen_promptsmiles.py</code> + <code>gen_promptsmiles.sh</code>（新規）</p>
+        <p><strong>変更内容:</strong> finetuning 済み GPT2 をロードし、<code>promptsmiles</code> の <code>ScaffoldDecorator</code>/<code>FragmentLinker</code> に <code>sample_fn(prompt, batch_size)</code>（HF <code>model.generate</code>）と <code>evaluate_fn(smiles_list)</code>（NLL）を渡して生成。評価対象のスキャフォールド／フラグメントは<strong>共通テスト分子 <code>te_smiles</code> から既存の <code>src/func/fragmentation.py</code> で生成</strong>し、PromptSMILES 記法（<code>*</code>、<code>.</code>）へ変換。引数: <code>--task {scaffold, linking}</code>, <code>--frag_method</code>, <code>--mode</code>, <code>--n_samples</code>, <code>--random_seed 42</code>。<code>Chem.MolFromSmiles</code> の None チェック必須。出力は <code>evaluation.py</code> が読める形式で保存。</p>
+        <p><strong>依存関係:</strong> Step 5 の後</p>
+      </li>
+    </article>
+    <article class="step" data-step="7">
+      <li>
+        <h3>Step 7: 評価パイプラインへの統合</h3>
+        <p><strong>対象ファイル:</strong> <code>src/evaluation.py</code>（+ 必要に応じて <code>src/func/evaluation_func.py</code>）</p>
+        <p><strong>変更内容:</strong> <code>--model_name</code> の choices に <code>promptsmiles</code> を追加し、<code>str_name</code>/<code>model_dir</code>/<code>arc_name</code> の分岐と生成結果の読み取りを追加。validity / uniqueness / novelty / 再構成率を RFFMG・SAFE と<strong>同一関数</strong>で算出できるよう配線。</p>
+        <p><strong>依存関係:</strong> Step 6 の後</p>
+      </li>
+    </article>
+    <article class="step" data-step="8">
+      <li>
+        <h3>Step 8: 再現性・ログの担保（横断）</h3>
+        <p><strong>対象ファイル:</strong> Step 3〜7 の各ファイル</p>
+        <p><strong>変更内容:</strong> <code>set_seed(42)</code> の使用、乱数シードの明示、ハイパラ・メトリクスのログ保存、wandb offline ディレクトリの分離、データパスの <code>Path</code>/<code>BASEPATH</code> 経由での取り扱いを徹底。</p>
+        <p><strong>依存関係:</strong> Step 3〜7 に内包</p>
+      </li>
+    </article>
+  </ol>
+</section>
+
+<section id="notes">
+  <h2>実行順序と実行時間の見積もり</h2>
+  <ul>
+    <li>Step 1→2 を先に済ませ、tokenizer の適合性を確認してから Step 4 以降の本実装に進む。</li>
+    <li><strong>学習規模</strong>: brics の場合 分子 1,808,325 件、train は 95% で約 1,717,900 分子。augmentation を行わないため <strong>1エポックあたり約172万系列</strong>、<code>batch_size=32</code> なので <strong>1エポック ≈ 約53,700 steps</strong>。<code>num_train_epochs=50</code> に到達する前に EarlyStopping（検証15回連続＝75,000 steps 改善なし）で停止する想定。augmentation を行う場合と比べて1エポックあたりのstep数は約1/10であり、他手法より学習データ量は少なくなる（＝1分子1系列という設計上の意図通り）。</li>
+    <li><strong>学習の実行はユーザーが行う</strong>。本計画のスコープは実装までとし、実装完了後に実行手順を提示する。実行は SAFE/RFFMG と同じ GPU（<code>CUDA_VISIBLE_DEVICES=0</code>）を使う想定。</li>
+    <li><strong>実施モード</strong>: <code>finetuning</code> と <code>from_scratch</code> の<strong>両方を学習する</strong>（既存2手法と同じ構成に揃えるため）。スクリプトは両モードを切り替えられる形で用意する。</li>
+  </ul>
+  <h2>用語の定義（本計画内）</h2>
+  <ul>
+    <li><strong>step</strong>: 1バッチ分の学習＝1回のパラメータ更新。<code>1エポックのstep数 = 学習データ件数 ÷ batch_size</code>。</li>
+    <li><code>warmup_steps=10000</code>: 最初の10,000更新で学習率を 0→1e-4 へ線形に上げる。</li>
+    <li><code>eval_steps=5000</code> / <code>save_steps=5000</code>: 5,000更新ごとに検証・チェックポイント保存。</li>
+    <li><code>EarlyStopping(patience=15)</code>: 検証15回連続（＝75,000 steps）で改善がなければ学習を打ち切る。</li>
+  </ul>
+  <h2>未確定事項</h2>
+  <ol>
+    <li>Step 2 で tokenizer 不適合が判明した場合の代替案（SMILES専用 tokenizer の導入可否）。</li>
+  </ol>
+</section>
+</body>
+</html>

@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Plan: 生成評価用にテストセットを間引く（RFFMG + SAFE） (2026-07-27)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; }
+  h1 { border-bottom: 2px solid #333; }
+  .step { margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+  pre { background: #f4f4f4; padding: 0.8em; border-radius: 4px; overflow-x: auto; }
+  table { border-collapse: collapse; margin: 1em 0; }
+  th, td { border: 1px solid #ccc; padding: 0.4em 0.8em; text-align: left; }
+  th { background: #f0f0f0; }
+  .warn { background: #fff8e1; border-left: 4px solid #e6a700; padding: 0.8em 1em; margin: 1em 0; }
+  .ok { background: #f1f8e9; border-left: 4px solid #7cb342; padding: 0.8em 1em; margin: 1em 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plan: 生成評価用にテストセットを間引く（RFFMG + SAFE）</h1>
+  <p class="meta">Date: 2026-07-27 | Status: implemented（Step 1-3 実施済み / Step 4 は見送り）</p>
+</header>
+
+<section id="overview">
+  <h2>概要</h2>
+  <p>
+    <code>normal</code> の生成に brics 5times で 62 時間、RFFMG 4条件の合計で約 358 時間（15日）かかる。
+    原因はテストセットの行数で、<code>normal</code> だけが全量（24.8万〜50.8万行）を使い、
+    他のロバストネス評価用スライスは 1万〜12万行の固定サブセットになっている。
+  </p>
+  <p>
+    テスト分割（分子単位 2.5%）はそのまま維持し、<strong>生成評価に使う分子と行だけを間引く</strong>。
+    分割比を変えると訓練データが変わりモデル自体が別物になるため、分割には触らない。
+  </p>
+
+  <h3>方針（ユーザー決定）</h3>
+  <ol>
+    <li><strong>テスト分割の全分子から無作為に 20,000 分子を抽出</strong>する。候補を
+      「断片化パターンが5通り以上ある分子」に絞ると大きい分子に偏る
+      （brics 5times で重原子数の平均が 24.4 → 29.7）ため、候補は絞らない。</li>
+    <li>各分子につき<strong>最大5行</strong>（<code>min(5, 実際の行数)</code>）を採用する。</li>
+    <li><strong>RFFMG と SAFE に同じ 20,000 分子を適用</strong>し、表現手法の比較の土台を揃える。</li>
+    <li><strong>SAFE のデータセット生成は <code>sampling_num == 5</code> のときだけ</strong>実行する。
+      SAFE は sampling_num の概念を持たず <code>data/safe/{frag}/normal</code> に固定出力するため、
+      他の sampling_num で実行すると別の分割で上書きされてしまう。</li>
+    <li>間引くのは <strong>test のみ</strong>。train / val は全量のまま（学習に影響させない）。</li>
+  </ol>
+
+  <h3>実測値（RFFMG）</h3>
+  <table>
+    <tr><th>条件</th><th>現在の行数</th><th>間引き後</th><th>推定時間</th></tr>
+    <tr><td>brics 5times</td><td>248,724</td><td>82,441</td><td>20.6 時間</td></tr>
+    <tr><td>brics 10times</td><td>352,920</td><td>85,459</td><td>21.3 時間</td></tr>
+    <tr><td>rc_cms 5times</td><td>328,116</td><td>90,974</td><td>22.7 時間</td></tr>
+    <tr><td>rc_cms 10times</td><td>507,879</td><td>92,872</td><td>23.2 時間</td></tr>
+    <tr><td><strong>合計</strong></td><td><strong>1,437,639（358時間）</strong></td>
+        <td><strong>351,746</strong></td><td><strong>87.8時間 = 3.7日</strong></td></tr>
+  </table>
+  <p>
+    推定時間は brics 5times の実績（248,724 行 = 62 時間、1行あたり 0.90 秒）からの換算。
+    <code>frag_order</code> は間引き後も 10,000 件の抽出に必要な候補（3断片以上の行）が
+    45,531〜66,488 行残るため成立する。
+  </p>
+
+  <h3>再現性の検証結果（実施済み）</h3>
+  <div class="ok">
+    <p>
+      <code>full_dataset.csv</code> から <code>make_datasets.py:63-67</code> と同じ手順で分割を再導出し、
+      ディスク上のファイルと SMILES 集合を照合した。
+    </p>
+    <table>
+      <tr><th></th><th>train</th><th>val</th><th>test</th></tr>
+      <tr><td>RFFMG brics</td><td>1,717,908 一致</td><td>45,208 一致</td><td>45,209 一致</td></tr>
+      <tr><td>RFFMG rc_cms</td><td>1,772,900 一致</td><td>46,655 一致</td><td>46,656 一致</td></tr>
+      <tr><td>SAFE rc_cms</td><td>一致</td><td>一致</td><td>一致</td></tr>
+      <tr><td>SAFE brics</td><td>3,610 少ない</td><td>5 少ない</td><td>一致</td></tr>
+    </table>
+    <ul>
+      <li><strong>再実行しても同じ分割になる</strong>ことを確認済み。<code>tr_smiles</code> /
+        <code>val_smiles</code> / <code>te_smiles</code> は L67 で一度だけ計算され
+        RFFMG と SAFE が共有するため、両者で同一。</li>
+      <li>SAFE brics の差は <code>drop_duplicates(subset='full_safe')</code>（L93-94、test には未適用）
+        によるもの。欠けた 3,610 分子は全て <code>safe_smiles.csv</code> に存在しており、
+        SAFE 変換での欠落はゼロ。決定的な処理なので再実行で同じ結果になる。</li>
+      <li><strong>SAFE の test は分割と完全一致</strong>（dedup 未適用のため）。よって同じ
+        <code>te_smiles</code> を適用すれば RFFMG と SAFE で同一の分子集合を評価できる。</li>
+    </ul>
+  </div>
+
+  <h3>波及範囲</h3>
+  <table>
+    <tr><th>スライス</th><th>入力元</th><th>間引きの影響</th></tr>
+    <tr><td><code>frag_order</code></td><td><code>normal/test.source</code>（インデックス指定）</td>
+        <td><strong>作り直しになる</strong></td></tr>
+    <tr><td><code>frag_num</code> / <code>dup_frags</code> / <code>attach_point_num</code></td>
+        <td><code>normal/train.source</code> + <code>unique_frags.csv</code></td><td>なし</td></tr>
+    <tr><td>SAFE <code>data/safe/{frag}/normal</code></td><td><code>te_smiles</code></td>
+        <td><strong>test が間引かれる</strong></td></tr>
+  </table>
+  <p>
+    <code>evaluation.py:78-82</code> は <code>frag_order</code> の評価で
+    <code>random_get_ids.pkl</code> を使って <code>normal</code> の結果から同じ行を引くため、
+    <code>normal</code> と <code>frag_order</code> は行が揃っている必要がある。
+    <code>evaluation_func.py:52</code> は <code>test.source</code> と
+    <code>predictions.csv</code> を<strong>行番号で連結</strong>するため、間引き後の
+    <code>test.source</code> は対応する <code>predictions.csv</code> とセットで扱う必要がある。
+  </p>
+  <p><code>gen_rffmg.py</code> / <code>gen_safe.py</code> の変更は不要（パスは変わらず中身が減るだけ）。</p>
+</section>
+
+<section id="plan">
+  <h2>実装計画</h2>
+  <ol>
+    <article class="step" data-step="1">
+      <li>
+        <h3>Step 1: 定数とヘルパー関数、引数を追加する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/make_datasets.py</code></p>
+        <p><strong>変更内容:</strong> モジュールレベル（L43-44 付近）に定数を追加する。</p>
+<pre><code>SAFE_SAMPLING_NUM = 5  # SAFE は sampling_num を持たず data/safe/{frag}/normal に固定出力するため、この値のときだけ生成する</code></pre>
+        <p>既存のヘルパー関数群の後に、型ヒントと Google style docstring 付きの関数を1つ追加する。</p>
+<pre><code>def cap_rows_per_molecule(df: pd.DataFrame, max_rows: int) -&gt; pd.DataFrame:
+    """1分子あたりの行数を上限まで間引く。
+
+    Args:
+        df: ``smiles`` 列を持つデータフレーム。
+        max_rows: 1分子あたりに残す最大行数。
+
+    Returns:
+        各 ``smiles`` について先頭 ``max_rows`` 行だけを残したデータフレーム。
+        元の行順を保持し、インデックスは振り直す。
+    """
+    return df.groupby('smiles', sort=False).head(max_rows).reset_index(drop=True)</code></pre>
+        <p>argparse（L48-51）に引数を2つ追加する。既存の書き方に合わせる。</p>
+<pre><code>parser.add_argument('--test_mol_num', type=int, default=None, help='number of test molecules kept for generation evaluation (default: None, keep all)')
+parser.add_argument('--test_rows_per_mol', type=int, default=5, help='max fragmentation patterns kept per test molecule (default: 5)')</code></pre>
+        <p>既定値を <code>None</code> にすることで、引数なしの実行は現在と同じ全量出力になる（後方互換）。</p>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="2">
+      <li>
+        <h3>Step 2: <code>te_smiles</code> を間引き、行数上限を RFFMG と SAFE の両方に適用する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/make_datasets.py</code></p>
+        <p><strong>変更内容:</strong> 分割直後（L67 の後）に <code>te_smiles</code> そのものを間引く。
+          ここに置くことで RFFMG と SAFE の両方が同じ分子集合を使う。</p>
+<pre><code># Subsample the test molecules: generating on the full test split is prohibitively slow.
+# Applied to te_smiles itself so that RFFMG and SAFE are evaluated on the same molecules.
+if args.test_mol_num is not None:
+    random.seed(0)
+    te_smiles = random.sample(sorted(te_smiles), args.test_mol_num)</code></pre>
+        <p>
+          <code>sorted()</code> を挟むのは、<code>unique()</code> の順序に依存せず
+          同じ seed で同じ分子集合を得るため。
+        </p>
+        <p><code>rffmg_te</code>（L72）と <code>safe_te</code>（L95）の直後に行数上限を適用する。</p>
+<pre><code>if args.test_mol_num is not None:
+    rffmg_te = cap_rows_per_molecule(rffmg_te, args.test_rows_per_mol)
+
+# ... SAFE 側
+if args.test_mol_num is not None:
+    safe_te = cap_rows_per_molecule(safe_te, args.test_rows_per_mol)</code></pre>
+        <p>
+          <code>safe_tr</code> / <code>safe_val</code> / <code>rffmg_tr</code> /
+          <code>rffmg_val</code> には適用しない（train/val は全量維持）。
+          L133 で <code>normal/test.source</code> を読む <code>frag_order</code> は、
+          間引き後のファイルから自動的に作られる。
+        </p>
+        <p><strong>依存関係:</strong> Step 1 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="3">
+      <li>
+        <h3>Step 3: SAFE の生成を <code>sampling_num == 5</code> のときだけ実行する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/make_datasets.py</code></p>
+        <p><strong>変更内容:</strong> SAFE ブロック全体（L92 の <code># safe</code> から
+          L121 の debug 保存まで）を条件で囲む。既存の処理内容は変更せず、
+          インデントと条件の追加のみ。</p>
+<pre><code># SAFE datasets have no sampling_num level (they are written to data/safe/{frag}/normal),
+# so only build them for the canonical sampling_num to avoid overwriting with another split.
+if args.sampling_num == SAFE_SAMPLING_NUM:
+    # safe
+    safe_tr  = ...
+    （以下、既存の L93-121 をインデントして格納）</code></pre>
+        <p><strong>依存関係:</strong> Step 2 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="4">
+      <li>
+        <h3>Step 4: <code>run_cpu.sh</code> を更新する（任意）</h3>
+        <p><strong>対象ファイル:</strong> <code>run_cpu.sh</code></p>
+        <p><strong>変更内容:</strong> 現状
+          <code>~/Research/mol_gen_frags_copy/src/make_datasets.py</code> という別リポジトリを
+          指しており、<code>--sampling_num</code> も渡していない。実行できる状態に直したうえで、
+          間引き引数を渡す。変数の書き方とコメント文言は
+          <code>src/train_model/run_rffmg.sh</code> に揃える。
+          <strong>このステップは独立</strong>。不要であれば外してよい。</p>
+<pre><code>FRAG_NAME="brics"    # "brics" or "rc_cms"
+SAMPLING_NUM=5       # 5 or 10 (uses the data/rffmg/&lt;frag&gt;/&lt;N&gt;times_sampling slice)
+
+~/miniconda3/envs/safe/bin/python ~/Research/mol_gen_frags/src/make_datasets.py \
+    --frag_method ${FRAG_NAME} --sampling_num ${SAMPLING_NUM} --test_mol_num 20000</code></pre>
+        <p><strong>依存関係:</strong> Step 3 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="5">
+      <li>
+        <h3>Step 5: 動作確認</h3>
+        <p><strong>対象ファイル:</strong> 変更なし（確認のみ）</p>
+        <ul>
+          <li><code>python -m py_compile src/make_datasets.py</code> / <code>bash -n run_cpu.sh</code></li>
+          <li><code>python src/make_datasets.py --help</code> で新しい引数2つが出ること。</li>
+          <li><code>--sampling_num 10</code> では SAFE ブロックが実行されないことをコード上で確認する。</li>
+          <li><strong>本実行はしない</strong>（非常に重いため）。代わりに間引きロジックだけを
+            既存の <code>normal/test.*</code> と <code>safe_smiles.csv</code> に対して切り出して実行し、
+            次の2点を確認する。
+            <ul>
+              <li>RFFMG の行数が上表と一致すること（brics 5times = 82,441 行）。</li>
+              <li><strong>SAFE の test 行数が RFFMG と一致すること</strong>。両者は同じ分子集合・
+                同じ上限で間引くため一致するはずだが、1分子あたりの行数が
+                <code>safe_smiles.csv</code> と <code>full_dataset.csv</code> で揃っているかは
+                未検証のため、ここで確かめる。</li>
+            </ul>
+          </li>
+          <li>引数なしの場合に <code>te_smiles</code> / <code>rffmg_te</code> / <code>safe_te</code> が
+            変更されない（後方互換）ことを確認する。</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 3 の後</p>
+      </li>
+    </article>
+  </ol>
+</section>
+
+<section id="results">
+  <h2>実施結果（2026-07-27）</h2>
+  <div class="ok">
+    <p>
+      Step 1-3 を <code>src/make_datasets.py</code> に実装。Step 4（<code>run_cpu.sh</code>）は
+      ユーザー指示により見送り（実行はユーザー側で行うため）。Step 5 の確認は以下のとおり全て通過。
+    </p>
+    <ul>
+      <li><code>py_compile</code> 通過。<code>--help</code> に <code>--test_mol_num</code> /
+        <code>--test_rows_per_mol</code> が出ることを確認。</li>
+      <li>SAFE ブロックのガード範囲を行番号で確認（L123 の <code>if</code> から L156 の
+        <code>save_to_disk</code> まで内側、L158 の <code>frag_order</code> 生成以降は外側）。
+        <code>--sampling_num 10</code> では SAFE の書き出しがスキップされる。</li>
+      <li><strong>間引き後の行数を実データで照合し、RFFMG と SAFE が完全一致することを確認</strong>
+        （計画時点で唯一未検証だった前提）。</li>
+    </ul>
+    <table>
+      <tr><th></th><th>RFFMG test</th><th>SAFE test</th><th></th></tr>
+      <tr><td>brics</td><td>82,441 行（20,000 分子）</td><td>82,441 行（20,000 分子）</td><td>一致</td></tr>
+      <tr><td>rc_cms</td><td>90,974 行（20,000 分子）</td><td>90,974 行（20,000 分子）</td><td>一致</td></tr>
+    </table>
+
+    <h3>再現性の追加検証（行レベル）</h3>
+    <p>
+      計画作成時の照合は SMILES 集合の比較にとどまっていたため、行単位でも確認した。
+      <code>full_dataset.csv</code> をファイルの行順のままなめて各 split に振り分け、
+      <code>make_datasets.py:75-77</code> と同じ形式でバイト列を組み立て、MD5 を比較。
+    </p>
+    <p>
+      <strong>brics / rc_cms の train / val / test × source / target の計12ファイルすべてで
+      MD5 が一致。</strong> 再実行すれば既存ファイルとバイト単位で同一のものが再生成される。
+      この保証は <code>full_dataset.csv</code> が変更されないことが前提
+      （<code>rffmg_frags.py</code> を再実行すると切れる）。
+    </p>
+  </div>
+</section>
+
+<section id="notes">
+  <h2>実行時の注意</h2>
+  <div class="warn">
+    <p><strong>1. 実行前にバックアップを取ること</strong></p>
+    <p>
+      <code>data/safe/{brics,rc_cms}/normal</code> は現在の SAFE 学習済みモデルの
+      学習データそのもので、再実行で上書きされる（内容は再現される見込みだが保険をかける）。
+      <code>data/rffmg/{frag}/{N}times_sampling/normal</code> も同様。
+    </p>
+<pre><code>cp -r data/safe/brics/normal data/safe/brics/normal.bak
+cp -r data/safe/rc_cms/normal data/safe/rc_cms/normal.bak</code></pre>
+  </div>
+  <div class="warn">
+    <p><strong>2. <code>make_datasets.py</code> の再実行そのものが重い</strong></p>
+    <p>
+      L157 / L188 / L248 で <code>train.source</code> の全行（brics 5times で 9,459,145 行）を
+      <code>canonical_smiles</code> にかける処理が<strong>3回</strong>走る。RDKit の正準化を
+      約2,800万回行う計算で、数時間規模のCPU時間がかかる。
+    </p>
+  </div>
+  <p><strong>3. 再生成が必要になる結果</strong></p>
+  <ul>
+    <li>RFFMG <code>normal</code>: 4条件 × 約21〜23時間 = 約88時間</li>
+    <li>RFFMG <code>frag_order</code>: 4条件 × 12.5時間 = 約50時間（間引きに伴い作り直し）</li>
+    <li>SAFE <code>normal</code>: 所要時間は未見積もり。<code>generation_safe_func.py</code> は
+      1分子ずつ60秒タイムアウト付きで回す作りで、RFFMG とは時間特性が異なる。必要なら別途見積もる。</li>
+    <li><code>dup_frags</code> / <code>frag_num</code> / <code>attach_point_num</code> は
+      入力もシードも変わらないため既存結果が使える。</li>
+  </ul>
+  <p><strong>4. 論文への記載</strong></p>
+  <ul>
+    <li>データ分割（95/2.5/2.5）と評価プロトコル（テスト分割から無作為抽出した 20,000 分子、
+      各最大5断片化）は分けて書く。抽出はシード固定で再現可能。</li>
+    <li>代表性を示すなら、抽出した20,000分子と全テスト分割の物性分布（MW / LogP / QED / TPSA）を
+      <code>evaluation_func.py</code> の <code>calcPhysicProp</code>(L576) と
+      <code>jensenshannon</code>(L648) で比較できる。</li>
+    <li><strong>5times と 10times のテスト分子集合はほぼ重ならない</strong>（共通 2.6% / 3.4%）。
+      <code>unique_smiles</code> の並び順が <code>full_dataset.csv</code> の行順に依存するため、
+      同じ seed でも別の分割になる。サンプリング数の効果を論じる際は説明が要る。</li>
+  </ul>
+  <p>
+    <strong>5. スコープ外</strong>: <code>evaluation.py</code> が sampling 階層に対応していない件は
+    今回は触らない。評価を回す前に別途対応が必要。
+  </p>
+</section>
+</body>
+</html>
