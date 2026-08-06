@@ -111,6 +111,14 @@
     したがって <strong>top-k accuracy の上限が 17.5% になる</strong>。</p>
     <p>これは実装の都合ではなく手法自体の性質なので、そのまま評価結果として報告する（ユーザー決定）。
     必要なら直結を含まない部分集合での再集計は後から追加できる。</p>
+    <p><strong>番号付き <code>pass_fragments</code> を渡す案（paired）は2回検討し、2回とも見送った（ユーザー決定）。</strong>
+    <code>full_dataset.csv</code> の <code>pass_fragments</code> には正しい対の番号が入っており、
+    SAFE test split と行対応も取れる（82,441行・<code>smiles</code> 完全一致・番号除去後も一致することを実測で確認済み）。
+    番号を振るのはモデルではなく前処理コードの仕事なので、正しい番号を使うこと自体は技術的に容易で、
+    再学習も不要（生成を1回追加で回すだけ）。それでも見送る理由は、番号が
+    「どの与断片同士が直接つながっているか」という<strong>正解分子の部分構造情報</strong>にあたり、
+    RFFMG・SAFE・PromptSMILES の3手法はいずれもこれを受け取らないためである。
+    入力情報量を4手法で厳密に揃えることを優先する。</p>
     <p>比較のための実測（既存の SAFE 生成結果 <code>results/safe_gpt/trained/safe/brics/beam/normal</code>）:</p>
     <table>
       <tr><th></th><th>完全一致率</th></tr>

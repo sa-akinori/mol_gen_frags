@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Plan: gen_safe_denovo.py を生成専用にする (2026-07-31)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; }
+  h1 { border-bottom: 2px solid #333; }
+  .step { margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+  pre { background: #f4f4f4; padding: 0.8em; border-radius: 4px; overflow-x: auto; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; margin: 1em 0; }
+  th, td { border: 1px solid #ddd; padding: 0.4em 0.8em; text-align: left; }
+  th { background: #f4f4f4; }
+  .ask { background: #fffbe6; border-left: 4px solid #e6c200; padding: 0.8em 1em; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plan: gen_safe_denovo.py を生成専用にする（評価・比較の削除）</h1>
+  <p class="meta">Date: 2026-07-31 | Status: pending-approval</p>
+</header>
+
+<section id="overview">
+  <h2>概要</h2>
+  <p><code>src/gen_safe_denovo.py</code> は現在、direct / library の 2 経路で de novo 生成を行い、
+  Validity を計算して比較サマリ（<code>comparison.csv</code>）を出力する「比較スクリプト」になっている。
+  これを<strong>生成のみを行うスクリプト</strong>に変更する。</p>
+  <p>削除するのは「評価（Validity 計算）」と「2 経路を回して比較する」部分。
+  生成経路そのものは 2 つとも残し、引数 <code>method</code> で選択する形にする
+  （比較はしないが、どちらの経路でも生成できる状態は維持する）。</p>
+
+  <h3>事前調査</h3>
+  <table>
+    <tr><th>確認項目</th><th>結果</th></tr>
+    <tr><td><code>run_denovo_comparison</code> / <code>compute_validity</code> の外部呼び出し</td><td>なし（同ファイル内のみ）</td></tr>
+    <tr><td><code>comparison.csv</code> / <code>generated.csv</code> を読む後続コード</td><td>なし（<code>src/evaluation.py</code> が読むのは <code>predictions.csv</code>）</td></tr>
+    <tr><td><code>.sh</code> からの呼び出し</td><td>なし</td></tr>
+    <tr><td>既存の出力ディレクトリ</td><td><code>results/safe/gpt/pretrained/</code> は未作成（実行実績なし）</td></tr>
+  </table>
+
+  <h3>残すもの・消すもの</h3>
+  <ul>
+    <li><strong>残す</strong>: <code>_canonicalize_smiles</code> / <code>_decode_safe_smiles</code>
+      （Validity の指標計算ではなく、SMILES バリデーション + canonical 化。CLAUDE.md の
+      「SMILES のバリデーションは省略しない」に該当するため生成側の責務として残す）</li>
+    <li><strong>残す</strong>: <code>generate_denovo_direct</code> / <code>generate_denovo_library</code>（生成本体、変更なし）</li>
+    <li><strong>消す</strong>: <code>compute_validity</code>（評価指標）</li>
+    <li><strong>消す</strong>: 2 経路を for で回す比較ループ、<code>comparison.csv</code> の出力、サマリの print</li>
+  </ul>
+</section>
+
+<section id="plan">
+  <h2>実装計画</h2>
+  <ol>
+    <article class="step" data-step="1">
+      <li>
+        <h3>Step 1: <code>compute_validity</code> を削除する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_safe_denovo.py</code>（L98-113）</p>
+        <p><strong>変更内容:</strong> 関数 <code>compute_validity</code> を丸ごと削除する。他から参照されていないことは確認済み。</p>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="2">
+      <li>
+        <h3>Step 2: 生成経路のディスパッチ表を追加する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_safe_denovo.py</code>（<code>generate_denovo_library</code> の直後）</p>
+        <p><strong>変更内容:</strong> モジュールレベルに以下を追加する。比較ループ内のローカル辞書
+          <code>methods</code> を廃し、経路の選択肢を 1 箇所で定義する。</p>
+<pre><code>GENERATORS = {"direct": generate_denovo_direct, "library": generate_denovo_library}</code></pre>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="3">
+      <li>
+        <h3>Step 3: <code>run_denovo_comparison</code> を <code>run_denovo_generation</code> に置き換える</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_safe_denovo.py</code>（L116-166）</p>
+        <p><strong>変更内容:</strong> 比較用関数を、単一経路で生成して保存するだけの関数に置き換える。</p>
+<pre><code>def run_denovo_generation(
+    model_path: str | Path,
+    output_dir: str | Path,
+    method: str = "direct",
+    n_samples: int = 1000,
+    max_length: int = 200,
+    random_seed: int = 42,
+) -> pd.DataFrame:
+    """指定した経路で de novo 生成し、結果を CSV に保存する。
+
+    Args:
+        model_path: 学習済み SAFE-GPT モデルのパス。
+        output_dir: 生成結果の保存先ディレクトリ（配下に &lt;method&gt;/generated.csv を作る）。
+        method: 生成経路。'direct'（model.generate を直接呼ぶ）または
+            'library'（SAFEDesign.de_novo_generation を使う）。
+        n_samples: 生成本数。
+        max_length: 生成配列の最大長。
+        random_seed: 乱数シード（生成前に設定）。
+
+    Returns:
+        pd.DataFrame: 生成結果。カラムは ['raw_index', 'smiles']
+            （'smiles' は canonical SMILES。妥当でない分子は欠損値）。
+    """</code></pre>
+        <p>処理の中身:</p>
+        <ol>
+          <li><code>method</code> が <code>GENERATORS</code> にない場合は <code>ValueError</code> を送出する。</li>
+          <li>モデル / トークナイザのロード、<code>device</code> 決定、<code>SAFEDesign</code> 構築は現行のまま流用する。</li>
+          <li><code>set_seed(random_seed)</code> の後、選択した 1 経路のみ実行する。</li>
+          <li><code>Path(output_dir) / method</code> を作成し <code>generated.csv</code> を保存する（現行と同じ配置。経路を変えて実行しても上書きされない）。</li>
+          <li><code>print</code> は保存先の通知のみとし、Validity の集計・表示は行わない。</li>
+          <li>戻り値は生成結果の DataFrame（比較サマリではない）。</li>
+        </ol>
+        <p><strong>依存関係:</strong> Step 1、Step 2 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="4">
+      <li>
+        <h3>Step 4: <code>__main__</code> を単一経路の実行に合わせる</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_safe_denovo.py</code>（L169-179）</p>
+        <p><strong>変更内容:</strong> <code>run_denovo_comparison(...)</code> の呼び出しを
+          <code>run_denovo_generation(...)</code> に変更し、<code>method</code> をローカル変数として明示する。</p>
+<pre><code>if __name__ == '__main__':
+    fd = Path(__file__).resolve().parent.parent
+    method = 'direct'
+    model_path = fd / 'models' / 'safe' / 'gpt' / 'pretrained'
+    output_dir = fd / 'results' / 'safe' / 'gpt' / 'pretrained' / 'denovo'
+    run_denovo_generation(
+        model_path=model_path,
+        output_dir=output_dir,
+        method=method,
+        n_samples=1000,
+        max_length=200,
+        random_seed=42,
+    )</code></pre>
+        <p><strong>依存関係:</strong> Step 3 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="5">
+      <li>
+        <h3>Step 5: 構文チェック</h3>
+        <p><strong>対象ファイル:</strong> なし（検証のみ）</p>
+        <p><strong>変更内容:</strong> <code>python -m py_compile src/gen_safe_denovo.py</code> が通ることを確認する。
+          実際の生成実行（GPU・モデル要）は行わない。</p>
+        <p><strong>依存関係:</strong> Step 4 の後</p>
+      </li>
+    </article>
+  </ol>
+</section>
+
+<section id="questions">
+  <h2>確認したい点</h2>
+  <div class="ask">
+    <ul>
+      <li><strong>生成経路の扱い</strong>: 上記は「direct / library の両方を残し、<code>method</code> 引数で選択」する案です。
+        もし「一方の経路だけ残して他方も削除する」意図であれば、どちらを残すかご指定ください。</li>
+      <li><strong>CLI 化</strong>: <code>src/gen_mols/</code> 配下のスクリプトは <code>argparse</code> 化されていますが、
+        本ファイルは現行どおりハードコードのままとしています（今回の指示の範囲外のため）。CLI 化も必要なら追加します。</li>
+    </ul>
+  </div>
+</section>
+
+<section id="out-of-scope">
+  <h2>今回は触らないもの</h2>
+  <ul>
+    <li><code>generate_denovo_direct</code> / <code>generate_denovo_library</code> の生成ロジック本体</li>
+    <li><code>src/evaluation.py</code> など他ファイル</li>
+    <li>コミット（指示があるまで行わない）</li>
+  </ul>
+</section>
+</body>
+</html>

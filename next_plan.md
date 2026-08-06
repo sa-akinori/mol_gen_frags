@@ -1,6 +1,6 @@
 # Next Plan
 
-- **Updated**: 2026-07-30
+- **Updated**: 2026-08-02
 - **Status**: pending-user-verification
 
 ## 最優先: promptsmiles / fraggpt データの生成と検証
@@ -27,18 +27,26 @@ python src/make_datasets.py --frag_method rc_cms --sampling_num 5
 
 ### 生成後に検証すること（期待値は 2026-07-30 の検証で確定した分割サイズ）
 
-| ファイル | brics | rc_cms |
+promptsmiles / fraggpt / safe はいずれも HF `DatasetDict`（`save_to_disk`）で保存される。
+行数は `datasets.load_from_disk(...)` の各 split の長さで確認する。
+
+| データ | brics | rc_cms |
 |---|---|---|
-| `data/promptsmiles/{frag}/normal/train.smi` | 1,717,908 行 | 1,772,900 行 |
-| `data/promptsmiles/{frag}/normal/val.smi` | 45,208 行 | 46,655 行 |
-| `data/promptsmiles/{frag}/normal/test.smi` | 20,000 行 | 20,000 行 |
-| `data/fraggpt/{frag}/normal/train.target` | 1,717,908 行 | 1,772,900 行 |
+| `data/promptsmiles/{frag}/normal` train split | 1,717,908 行 | 1,772,900 行 |
+| `data/promptsmiles/{frag}/normal` validation split | 45,208 行 | 46,655 行 |
+| `data/promptsmiles/{frag}/normal` test split | 20,000 行 | 20,000 行 |
+| `data/fraggpt/{frag}/normal` train split | 事前確定できない | 事前確定できない |
+| `data/fraggpt/{frag}/normal` validation split | 事前確定できない | 事前確定できない |
+| `data/fraggpt/{frag}/normal` test split | 20,000 行 | 20,000 行 |
 | `data/rffmg/{frag}/5times_sampling/normal/test.target` のユニーク分子 | 20,000 | 20,000 |
 | `data/safe/{frag}/normal` test split のユニーク分子 | 20,000 | 20,000 |
 
-- `data/fraggpt/{frag}/normal/{train,val}.smi` は `full_fragments` の重複排除後なので行数は事前確定できない。
-- `data/fraggpt/{frag}/normal/test.*` は**意図的に生成されない**。`gen_fraggpt.py` は SAFE test split を
-  プロンプト源にする設計のため（`generation_fraggpt_func.py:96`）。
+- promptsmiles は `smiles`, `pass_fragments` の2列（train/validation/test すべて）。
+- fraggpt は train/validation が `smiles`, `full_fragments`、test が `smiles`, `pass_fragments`。
+  train/validation は `full_fragments` の重複排除後なので行数は事前確定できない。
+- fraggpt の test split は `safe_te` から作られるため、SAFE・PromptSMILES・RFFMG と同一の行。
+  `gen_fraggpt.py` はこの test split をプロンプト源にし、`test.source` / `test.target` を
+  同じデータセットディレクトリに書き出す（`make_datasets.py` を再実行すると消える点に注意）。
 - 生成後、RFFMG test と SAFE test の分子集合が一致すること（2026-07-30 時点では一致を確認済み）を再確認する。
 
 ### 学習・生成の前提
@@ -51,6 +59,18 @@ python src/make_datasets.py --frag_method rc_cms --sampling_num 5
   / `--model_name fraggpt`（既定 `beam`）
 
 ## 保留中の項目（今日は着手しないと判断したもの）
+
+### 評価の立体比較が表現ベース手法に不利に働く（未対応・今後実装予定）
+
+- `evaluation_func.py` の `Smi2CanSmi` は `Chem.MolToSmiles(mol)`（`isomericSmiles=True` が既定）を
+  使うため、立体を含めて学習分子・正解分子と比較している
+- SAFE と FragGPT は二重結合を切った箇所の E/Z を復元できない
+  （FragGPT の組立の実測: 立体無視 100% / 立体込み 86.1%）
+- 実測（brics）: 学習分子の 30.7%、test 分子の 36.4% が立体情報を持つ
+- 影響: 生成分子の立体が落ちると学習分子と一致しないため **novelty が過大**、
+  正解分子とも一致しないため **top-k accuracy が過小**に出る。
+  SMILES を直接生成する RFFMG は影響を受けないため、手法間比較にバイアスが入る
+- ベースライン比較表を作る前に対応する
 
 ### evaluation.py 系のパスに sampling_num 階層がない
 
@@ -90,6 +110,17 @@ python src/make_datasets.py --frag_method rc_cms --sampling_num 5
 
 10times は比較目的ではなく別の理由で作成しているため問題なし、とユーザーが判断済み。
 ベースライン比較表を作る際は 5times を使う。
+
+## 参考: 2026-08-02 に完了した作業
+
+- PromptSMILES の学習データ重複排除を `smiles` 基準に修正
+  （計画: `.plans_for_ai/2026-08-02/fix_promptsmiles_dedup.md`）
+  - `make_datasets.py` の `promptsmiles_train` / `promptsmiles_valid` に
+    `drop_duplicates('smiles')` を追加。PromptSMILES はプレーンな SMILES を生成するため、
+    SAFE 由来の `full_safe` 基準では rc_cms で同一分子が 3.51 回重複していた
+  - `promptsmiles_test`（生成入力は `pass_fragments`）と SAFE・FragGPT の出力は変更なし
+  - このため上表の promptsmiles train / validation の期待行数は rc_cms では当てはまらない
+    （brics は既に 1分子1行のため変化なし）。`data/promptsmiles/` は未生成なので作り直しは不要
 
 ## 参考: 2026-07-30 に完了した作業
 

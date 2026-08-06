@@ -12,21 +12,50 @@ cd rffmg_molecular_design
 A tutorial for molecular generation is available in [`tutorial.ipynb`](tutorial.ipynb).
 It provides step-by-step instructions for extracting fragments from arbitrary SMILES and generating new molecules using pre-trained models.
 
-## Two Conda Environments Required
-### T5Chem
+## Four Conda Environments Required
+
+One environment per method. `pip install -e .` installs the local `func` package and is required in
+**every** environment.
+
+### T5Chem (also used by RFFMG-GPT and by dataset construction)
 ```bash
 conda create -n t5chem python=3.12.12
 conda activate t5chem
 pip install -r requirements/t5chem_requirements.txt
 pip install -e .
 ```
-### SAFE
+### SAFE (also used by evaluation)
 ```bash
 conda create -n safe python=3.12.12
 conda activate safe
 pip install -r requirements/safe_requirements.txt
 pip install -e .
 ```
+### PromptSMILES
+```bash
+conda create -n promptsmiles python=3.12.12
+conda activate promptsmiles
+pip install -r requirements/promptsmiles_requirements.txt
+pip install -e .
+```
+### FragGPT
+```bash
+conda create -n fraggpt python=3.12.12
+conda activate fraggpt
+pip install -r requirements/fraggpt_requirements.txt
+pip install -e .
+```
+
+| Method | Representation | Base model | Environment |
+|---|---|---|---|
+| RFFMG (T5Chem) | `fragments >> molecule` | T5 (~14.8M) | `t5chem` |
+| RFFMG (GPT2) | `fragments >> molecule` | `entropy/gpt2_zinc_87m` (~87M) | `t5chem` |
+| SAFE | SAFE string | safe-gpt (~88.8M) | `safe` |
+| PromptSMILES | plain SMILES + inference-time prompting | `entropy/gpt2_zinc_87m` | `promptsmiles` |
+| FragGPT | FU-SMILES (BRICS fragments with paired `[i*]` labels) | `entropy/gpt2_zinc_87m` | `fraggpt` |
+
+The `run_*.sh` and `gen_fraggpt.sh` scripts activate their environment themselves, so they can be
+launched from any shell.
 
 ## Modifications to Virtual Environments
 ## T5Chem
@@ -129,6 +158,21 @@ $ conda activate safe
 $ python src/make_datasets.py --frag_method brics # choose brics or rc_cms
 ```
 
+`make_datasets.py` writes the RFFMG dataset for every `--sampling_num`, but the SAFE, PromptSMILES
+and FragGPT datasets only when `--sampling_num 5` (the default), because those three have no
+`sampling_num` level and a different value would overwrite them with a different molecule split.
+Run it once per fragmentation method with the default to obtain all five datasets:
+
+| Dataset | Path | Content |
+|---|---|---|
+| RFFMG | `data/rffmg/{frag}/{N}times_sampling/normal/` | `train/val/test.source` + `.target` |
+| SAFE | `data/safe/{frag}/normal` | HF `DatasetDict` (`smiles`, `full_safe`, `pass_safe`, `full_fragments`, `pass_fragments`) |
+| PromptSMILES | `data/promptsmiles/{frag}/normal` | HF `DatasetDict` (`smiles`, `pass_fragments`) |
+| FragGPT | `data/fraggpt/{frag}/normal` | HF `DatasetDict`; train/validation hold `full_fragments`, test holds `pass_fragments` |
+
+All five share the same molecule split, and their test splits hold the same 20,000 molecules in the
+same row order, so the methods can be compared row by row.
+
 ### Model Training
 ```bash
 # 1. Train the RFFMG model (T5Chem or GPT2)
@@ -145,22 +189,68 @@ $ bash src/train_model/run_safe.sh
 # Due to the large number of arguments, they are specified in the .sh file.
 # Adjust the rc_cms part and output_dir in the .sh file as needed. Use --pretrain '' for training without a pre-trained model.
 # The from_scratch models in this study were trained with --pretrain ''.
+
+# 3. Train the PromptSMILES prior (plain-SMILES language model)
+$ bash src/train_model/run_promptsmiles.sh
+# The .sh activates env_promptsmiles itself. Set FRAG_NAME/MODE at the top of the .sh.
+# The prior is an unconditional SMILES language model; PromptSMILES supplies its prompt only at
+# inference time. Each molecule is always rewritten from a random root atom, because the prompts
+# seen at inference are non-canonical and start at an arbitrary atom. No augmentation is applied
+# (one molecule = one sequence), and the randomization is drawn once when the dataset is built.
+
+# 4. Train FragGPT (FU-SMILES language model)
+$ bash src/train_model/run_fraggpt.sh
+# The .sh activates env_fraggpt itself. Set FRAG_NAME/MODE at the top of the .sh.
+# The model is an unconditional FU-SMILES language model. The attachment labels are relabeled by a
+# random permutation and the fragments are shuffled (on by default; --no-augment disables it), which
+# does not change the number of sequences.
 ```
+
+`MODE="finetuning"` starts from `entropy/gpt2_zinc_87m`; `MODE="from_scratch"` uses the same config
+with random weights. All four GPT2-based methods share the same hyperparameters (LR 1e-4, 50 epochs,
+batch 32, warmup 10000, eval/save every 5000 steps, early stopping patience 15, seed 42), so the
+comparison isolates the representation rather than the training budget.
 
 ### Molecular Generation
+
+All four methods are prompted with the **same fragment sets** (the `pass_fragments` of the shared
+test split, attachment points written as bare `*` with no connectivity information) and write
+`predictions.csv` with the columns `target`, `prediction_1` .. `prediction_N`, so the shared
+evaluation pipeline reads them unchanged.
+
 ```bash
-# Generate molecules with the RFFMG model (T5Chem or GPT2; set MODEL_NAME inside the .sh)
+# RFFMG (T5Chem or GPT2; set MODEL_NAME inside the .sh)
+$ conda activate t5chem
 $ bash src/gen_mols/gen_rffmg.sh
 
-# Generate molecules with SAFE-GPT model
+# SAFE-GPT
+$ conda activate safe
 $ bash src/gen_mols/gen_safe.sh
+
+# PromptSMILES (scaffold decoration / fragment linking, chosen per row)
+$ conda activate env_promptsmiles
+$ bash src/gen_mols/gen_promptsmiles.sh
+# Set FRAG_NAME/MODEL_VER/GEN_METHOD at the top of the .sh.
+# GEN_METHOD="beam" matches RFFMG and SAFE; "sampling" is the multinomial scheme of the paper.
+
+# FragGPT
+$ bash src/gen_mols/gen_fraggpt.sh
+# The .sh activates env_fraggpt itself. Set FRAG_NAME/MODEL_VER at the top of the .sh.
+# Each attachment point of the prompted fragment set is given a fresh label, the model completes the
+# FU-SMILES string, and the fragments are reassembled by matching the [i*] labels.
 ```
+
+Results are written to `results/{repr}/{model}/{model_ver}/{frag}/{gen_method}/{additional_path}/`.
 
 ### Evaluation of Generated Molecules
 ```bash
 $ conda activate safe
 $ python src/evaluation.py --model_name t5chem --model_ver finetuning --frag_method rc_cms --additional_path normal
-# --model_name: t5chem / gpt (RFFMG-GPT) / safe_gpt
+# --model_name: t5chem / gpt (RFFMG-GPT) / safe_gpt / promptsmiles / fraggpt
+# --gen_method: beam / sampling (defaults to beam, except promptsmiles which defaults to sampling)
 ```
+
+Run the generation step first: the evaluation joins `test.source` and `predictions.csv` by row
+number, and PromptSMILES and FragGPT write their `test.source` / `test.target` at generation time.
 
 If you need the curated ChEMBL dataset used in this study, please feel free to contact us at [sato.akinori@naist.ac.jp] or [miyao@dsc.naist.jp].

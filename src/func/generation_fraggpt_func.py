@@ -1,49 +1,3 @@
-"""Generate molecules with a trained FragGPT (FU-SMILES) GPT2 model via beam search.
-
-FragGPT turns an unconditional FU-SMILES language model into a fragment-conditioned generator
-at *inference* time. Every attachment point of the prompted fragment set gets its own fresh
-label, the fragments are written in random order and the string is closed with the separator:
-
-    ``<bos> [1*]c1ccccc1.[2*]CCO.``
-
-The trailing ``.`` is the signal "write the next fragment". The model completes the FU-SMILES
-string; the completion is split at ``.`` again and the resulting fragments are assembled with
-the prompted ones by matching the ``[i*]`` labels (see ``func.fragment_for_fraggpt``).
-
-The prompted fragments are read from the ``pass_fragments`` column of the shared test split
-(``data/safe/{frag_method}/normal``, test split), and the reference molecule is the ``smiles``
-column of the same row -- exactly what SAFE (``generation_safe_func.py``) and PromptSMILES
-(``gen_promptsmiles.py``) prompt with, and the isotope-stripped form of the RFFMG
-``test.source``. The fragment sets are deliberately *not* recomputed here.
-
-Outputs (read unchanged by ``src/evaluation.py``):
-    - ``data/fraggpt/{frag_method}/normal/test.source``: fragment set per test molecule.
-    - ``data/fraggpt/{frag_method}/normal/test.target``: the test molecule itself.
-    - ``results/fraggpt/gpt/{model_ver}/{frag_method}/beam/normal/predictions.csv``:
-      columns ``target``, ``prediction_1`` .. ``prediction_N`` (T5Chem layout).
-
-All three files hold **one row per row of the test split**, in the test-split order. Rows are
-never dropped: a prompt that cannot be built or a candidate that cannot be assembled is
-written as an empty string, which the evaluation pipeline counts as invalid. This keeps the
-row numbers aligned with RFFMG, SAFE and PromptSMILES, so the four methods can be compared on
-identical molecules. Every failure is counted per reason and reported in
-``generation_params.txt``.
-
-Note on the exact-match ceiling: generation itself is unaffected by the following -- every
-prompted row yields molecules and those molecules contain all of the prompted fragments, so
-validity, uniqueness, novelty and the fragment-inclusion rate are not touched. Only the
-exact-match metric (top-k accuracy against the reference molecule) has a ceiling. FU-SMILES
-expresses a bond by writing the same label twice, so bonding two *prompted* fragments directly
-would need a ``[1*][2*]`` fragment, i.e. one made of two dummy atoms alone. A BRICS
-decomposition never produces such a fragment, hence it is absent from the training
-distribution, and FragGPT therefore always places at least one generated fragment between the
-prompted ones. In brics, 82.5% of the test rows have two prompted fragments bonded directly
-*in their reference molecule*; on those rows no candidate can equal the reference, which caps
-top-k accuracy at 17.5%. The reference molecule is never used during generation -- it only
-enters the picture in ``func.evaluation_func.calculateTopKAccuracy``. This is a property of the
-method, not a defect of this script.
-"""
-
 import argparse
 import os
 import random
@@ -55,70 +9,8 @@ import torch
 from tqdm import tqdm
 from transformers import AutoTokenizer, GPT2LMHeadModel, set_seed
 
-from func.fragment_for_fraggpt import (
-    ASSEMBLY_OK,
-    FRAGMENT_SEPARATOR,
-    assemble_fragments_with_reason,
-    renumber_open_attachments,
-    split_fragments,
-)
-from func.utility import BASEPATH, LogFile
-
-# Beam search is the decoding scheme RFFMG and SAFE are evaluated with.
-GEN_METHOD = "beam"
-
-
-def save_file(target: str, save_path: str) -> None:
-    """Write a string to a UTF-8 text file with LF newlines.
-
-    Args:
-        target: Text to write.
-        save_path: Destination file path.
-    """
-    with open(save_path, "w", newline="\n", encoding="utf-8") as f:
-        f.write(target)
-
-
-def read_test_split(frag_method: str) -> tuple[list[str], list[str]]:
-    """Read the reference molecules and their prompted fragment sets from the shared split.
-
-    The split is the one written by ``src/make_datasets.py`` and used by SAFE and PromptSMILES
-    (both read the same ``pass_fragments`` column) and, in its isotope-stripped form, by RFFMG
-    (``test.source``).
-
-    Args:
-        frag_method: Fragmentation method, either ``brics`` or ``rc_cms``.
-
-    Returns:
-        Pair ``(smiles, pass_fragments)`` of equally long lists, aligned row by row: the
-        reference molecule and its dot-separated fragment set.
-    """
-    test_dataset = datasets.load_from_disk(f"{BASEPATH}/data/safe/{frag_method}/normal")["test"]
-    return test_dataset["smiles"], test_dataset["pass_fragments"]
-
-
-def build_prompt(fragment_set: str, rng: random.Random) -> tuple[list[str], str]:
-    """Turn a fragment set into a FragGPT inference prompt.
-
-    Every bare ``*`` is given its own label ``1..k`` and the fragments are shuffled, so the
-    prompt shows the model ``k`` open attachment points in an arbitrary order and an arbitrary
-    numbering -- the two invariances the training augmentation taught.
-
-    Args:
-        fragment_set: Dot-separated fragment SMILES with unlabeled ``*`` attachment points.
-        rng: Random generator seeded per row, so the prompt is reproducible.
-
-    Returns:
-        Pair ``(fragments, prompt)``: the labeled fragments in prompt order and the prompt
-        string, which ends with the separator that asks for the next fragment.
-
-    Raises:
-        ValueError: If RDKit cannot parse one of the fragments.
-    """
-    fragments = renumber_open_attachments(split_fragments(fragment_set), rng)
-    rng.shuffle(fragments)
-    return fragments, FRAGMENT_SEPARATOR.join(fragments) + FRAGMENT_SEPARATOR
-
+from func.fragment_for_fraggpt import assemble_fragments_with_reason, label_attachment_points, split_fragments
+from func.utility import BASEPATH, LogFile, save_file
 
 def format_failure_summary(
     prompt_failures: Counter[str],
@@ -142,7 +34,7 @@ def format_failure_summary(
         f"test rows: {n_test}",
         f"rows without a prompt: {sum(prompt_failures.values())}",
         f"candidates: {n_candidates}",
-        f"assembled candidates: {assembly_reasons[ASSEMBLY_OK]}",
+        f"assembled candidates: {assembly_reasons['ok']}",
     ]
     lines += [f"  prompt failure ({reason}): {count}" for reason, count in sorted(prompt_failures.items())]
     lines += [f"  assembly ({reason}): {count}" for reason, count in sorted(assembly_reasons.items())]
@@ -152,20 +44,14 @@ def format_failure_summary(
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments for FragGPT generation."""
     parser = argparse.ArgumentParser(description="Generate molecules using a FragGPT (FU-SMILES) GPT2 model")
-    parser.add_argument("--frag_method", type=str, default="brics", choices=["brics", "rc_cms"],
-                        help="Fragmentation method (default: brics)")
-    parser.add_argument("--model_ver", type=str, default="finetuning", choices=["finetuning", "from_scratch"],
-                        help="Model version (default: finetuning)")
-    parser.add_argument("--n_samples", type=int, default=50,
-                        help="Number of samples to generate per molecule (default: 50)")
-    parser.add_argument("--max_length", type=int, default=256,
-                        help="Maximum sequence length (default: 256)")
-    parser.add_argument("--num_beams", type=int, default=50,
-                        help="Number of beams for beam search (default: 50)")
-    parser.add_argument("--batch_size", type=int, default=24,
-                        help="Batch size (default: 24)")
-    parser.add_argument("--random_seed", type=int, default=42,
-                        help="Random seed (default: 42)")
+    parser.add_argument("--frag_method", type=str, default="brics", choices=["brics", "rc_cms"], help="Fragmentation method (default: brics)")
+    parser.add_argument("--model_ver", type=str, default="finetuning", choices=["finetuning", "from_scratch"], help="Model version (default: finetuning)")
+    parser.add_argument("--n_samples", type=int, default=50, help="Number of samples to generate per molecule (default: 50)")
+    parser.add_argument("--max_length", type=int, default=256, help="Maximum sequence length (default: 256)")
+    parser.add_argument("--num_beams", type=int, default=50, help="Number of beams, used by the beam gen_method (default: 50)")
+    parser.add_argument("--batch_size", type=int, default=24, help="Batch size (default: 24)")
+    parser.add_argument("--random_seed", type=int, default=42, help="Random seed (default: 42)")
+    parser.add_argument("--gen_method", type=str, default="beam", choices=["beam", "sampling"], help="Decoding scheme: beam search or multinomial sampling (default: beam)")
     return parser.parse_args()
 
 
@@ -175,17 +61,21 @@ def main() -> None:
 
     model_path = f"{BASEPATH}/models/fraggpt/gpt/{args.model_ver}/{args.frag_method}/best_model"
     dataset_dir = f"{BASEPATH}/data/fraggpt/{args.frag_method}/normal"
-    output_dir = f"{BASEPATH}/results/fraggpt/gpt/{args.model_ver}/{args.frag_method}/{GEN_METHOD}/normal"
+    # Results of both decoding schemes live side by side under their own path segment, the one
+    # src/evaluation.py selects with its own --gen_method.
+    output_dir = f"{BASEPATH}/results/fraggpt/gpt/{args.model_ver}/{args.frag_method}/{args.gen_method}/normal"
     os.makedirs(dataset_dir, exist_ok=True)
     os.makedirs(output_dir, exist_ok=True)
 
     logfp = LogFile(f"{output_dir}/generation_params.txt")
     logfp.write(f"args: {vars(args)}")
-    logfp.write(f"gen_method: {GEN_METHOD}, model_path: {model_path}")
+    logfp.write(f"gen_method: {args.gen_method}, num_beams: {args.num_beams}")
+    logfp.write(f"model_path: {model_path}")
 
     # Prompts come from the fragment sets RFFMG, SAFE and PromptSMILES generate from, never
     # from a fresh fragmentation of the test molecules (see module docstring).
-    test_smiles, test_fragment_sets = read_test_split(args.frag_method)
+    test_dataset = datasets.load_from_disk(f"{BASEPATH}/data/fraggpt/{args.frag_method}/normal")["test"]
+    test_smiles, test_fragment_sets = test_dataset["smiles"], test_dataset["pass_fragments"]
 
     # One prompt per test row; None marks a row whose prompt could not be built. Such rows keep
     # their place so that predictions.csv, test.source and test.target stay aligned.
@@ -196,7 +86,9 @@ def main() -> None:
         # A per-row seed keeps the prompt of a row independent of the rows processed before it.
         rng = random.Random(args.random_seed + idx)
         try:
-            fragments, prompt = build_prompt(fragment_set, rng)
+            fragments = label_attachment_points(split_fragments(fragment_set), rng)
+            rng.shuffle(fragments)
+            prompt = '.'.join(fragments) + '.'
         except ValueError as err:
             prompt_failures["unparsable_fragment"] += 1
             logfp.write(f"prompt failed: fragments={fragment_set}, error={err}", suppress_std_out=True)
@@ -221,6 +113,10 @@ def main() -> None:
     predictions: list[list[str]] = [[""] * args.n_samples for _ in prompts]
     assembly_reasons: Counter[str] = Counter()
     prompted_rows = [idx for idx, prompt in enumerate(prompts) if prompt is not None]
+    # num_return_sequences stays outside the branch: predictions.csv holds n_samples columns per
+    # row, so both schemes must return n_samples candidates per prompt.
+    decode_params = ({"do_sample": True} if args.gen_method == "sampling"
+                     else {"do_sample": False, "num_beams": args.num_beams, "early_stopping": True})
     for start in tqdm(range(0, len(prompted_rows), args.batch_size), desc="fraggpt generation"):
         batch_rows = prompted_rows[start:start + args.batch_size]
 
@@ -236,13 +132,11 @@ def main() -> None:
             outputs = model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                do_sample=False,
-                num_beams=args.num_beams,
                 num_return_sequences=args.n_samples,
                 max_length=args.max_length,
-                early_stopping=True,
                 pad_token_id=pad_id,
                 eos_token_id=eos_id,
+                **decode_params,
             )
 
         completions = tokenizer.batch_decode(outputs[:, prompt_len:], skip_special_tokens=True)
@@ -256,7 +150,9 @@ def main() -> None:
                 predictions[row_idx][sample_idx] = smiles or ""
 
     # evaluation_func.loadGenSmiles concatenates test.source and predictions.csv by row number,
-    # so the three files must hold every test row, in the test-split order.
+    # so the three files must hold every test row, in the test-split order. Both files live in
+    # the dataset directory, which make_datasets.py recreates via save_to_disk: rerunning the
+    # data generation deletes them (run order: data -> training -> generation -> evaluation).
     assert len(test_fragment_sets) == len(test_smiles) == len(predictions), "source/target/prediction rows are misaligned"
     save_file("".join(f"{source}\n" for source in test_fragment_sets), f"{dataset_dir}/test.source")
     save_file("".join(f"{target}\n" for target in test_smiles), f"{dataset_dir}/test.target")

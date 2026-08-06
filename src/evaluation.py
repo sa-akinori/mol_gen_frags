@@ -52,20 +52,25 @@ if __name__ =='__main__':
         additional_path = 'normal'
         
     elif model_name == 'promptsmiles':
-        # Plain-SMILES corpus (one molecule per line) and the prompts written by gen_promptsmiles.py.
-        tr_file_name  = f'{BASEPATH}/data/promptsmiles/{frag_method}/normal/train.smi'
+        # Training molecules come from the PromptSMILES dataset, the single data source the prior
+        # is trained on (train_promptsmiles.py) and generated from; the prompts are the ones
+        # written by gen_promptsmiles.py into that same directory.
+        tr_file_name  = f'{BASEPATH}/data/promptsmiles/{frag_method}/normal'
         testInputfile = f'{BASEPATH}/data/promptsmiles/{frag_method}/{additional_path}/test.source'
 
     elif model_name == 'fraggpt':
-        # Molecules behind the FU-SMILES corpus and the prompts written by
-        # generation_fraggpt_func.py (the shared test split, with unlabeled `*`).
-        tr_file_name  = f'{BASEPATH}/data/fraggpt/{frag_method}/normal/train.target'
+        # Molecules behind the FU-SMILES corpus the prior is trained on (train_fraggpt.py) and
+        # the prompts written by generation_fraggpt_func.py into that same directory.
+        tr_file_name  = f'{BASEPATH}/data/fraggpt/{frag_method}/normal'
         testInputfile = f'{BASEPATH}/data/fraggpt/{frag_method}/{additional_path}/test.source'
 
     else:  # t5chem or gpt (RFFMG fragment representation)
         tr_file_name  = f'{BASEPATH}/data/rffmg/{frag_method}/normal/train.target'
         testInputfile = f'{BASEPATH}/data/rffmg/{frag_method}/{additional_path}/test.source'
 
+    # loadTrainSmiles picks its reader from the kind of path it is given (HuggingFace dataset
+    # directory for safe_gpt/promptsmiles/fraggpt, text file for t5chem/gpt), so arc_name -- the
+    # layout of the generated molecules -- is passed unchanged on both sides.
     trsmiles = loadTrainSmiles(arc_name, tr_file_name)
     
     # Calculate some basic physic property for training smiles

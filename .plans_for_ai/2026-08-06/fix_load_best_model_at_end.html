@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Plan: load_best_model_at_end を直書きに変更する (2026-08-06)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; }
+  h1 { border-bottom: 2px solid #333; }
+  h2 { border-bottom: 1px solid #ccc; margin-top: 2em; }
+  .step { margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+  pre { background: #f4f4f4; padding: 0.8em; border-radius: 4px; overflow-x: auto; }
+  .warn { background: #fff3f3; border-left: 4px solid #d9534f; padding: 0.8em 1em; margin: 1em 0; }
+  .note { background: #eef6ff; border-left: 4px solid #4a90d9; padding: 0.8em 1em; margin: 1em 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plan: load_best_model_at_end を直書きに変更する</h1>
+  <p class="meta">Date: 2026-08-06 | Status: approved</p>
+</header>
+
+<section id="overview">
+  <h2>概要</h2>
+  <p><code>train_fraggpt.py</code> / <code>train_promptsmiles.py</code> の
+  <code>--load_best_model_at_end</code> は <code>action='store_true'</code>（デフォルト <code>False</code>）だが、
+  両スクリプトが使う <code>EarlyStoppingCallback.on_train_begin</code> は次の assert を持つ
+  （transformers 4.45.2 で実測）。</p>
+
+  <pre><code>assert args.load_best_model_at_end, "EarlyStoppingCallback requires load_best_model_at_end = True"</code></pre>
+
+  <div class="warn">
+    <p>このため <code>.sh</code> を経由せず <code>.py</code> を直接起動すると、
+    <strong>1,714,298 行のトークナイズが終わった後に AssertionError で落ちる</strong>。</p>
+  </div>
+
+  <p><code>train_gpt.py</code>（RFFMG）は <code>load_best_model_at_end=True</code> を直書きしており、
+  この落とし穴がない。RFFMG に合わせて CLI フラグを廃止し直書きにする。</p>
+
+  <h3>影響の確認</h3>
+  <div class="note">
+    <p><code>train_promptsmiles.py</code> は既に実行済み
+    （<code>models/promptsmiles/gpt/finetuning/brics/best_model</code> が存在）だが、
+    その実行は <code>.sh</code> 経由で <code>--load_best_model_at_end</code> を渡していたため、
+    <strong>変更後と挙動は同一</strong>。既存モデルの作り直しは不要。</p>
+  </div>
+
+  <h3>スコープ外（ユーザー判断で対応しないと決めた項目）</h3>
+  <ul>
+    <li><code>.sh</code> の <code>conda activate</code> 環境名（<code>env_fraggpt</code> → <code>fraggpt</code> 等）
+      および <code>run_fraggpt.sh</code> のヘッダ復元。<strong>手動で環境を activate してから実行するため問題なし</strong>。</li>
+    <li><code>LogFile</code> の上書きモード。<strong>同じ <code>mode</code> × <code>frag_method</code> の
+      再実行で上書きされるのは問題なし</strong>。</li>
+    <li><code>generation_fraggpt_func.py</code> の <code>except ValueError</code> 不整合（別タスク）。</li>
+  </ul>
+</section>
+
+<section id="plan">
+  <h2>実装計画</h2>
+  <ol>
+    <article class="step" data-step="1">
+      <li>
+        <h3>Step 1: <code>train_fraggpt.py</code> から <code>--load_best_model_at_end</code> を削除して直書きにする</h3>
+        <p><strong>対象ファイル:</strong> <code>src/train_model/train_fraggpt.py</code></p>
+        <p><strong>変更内容:</strong></p>
+        <ul>
+          <li><code>parse_args()</code> 内の
+            <code>parser.add_argument("--load_best_model_at_end", action='store_true', help="Load best model at end (default: False)")</code>
+            （102行）を削除する。</li>
+          <li><code>TrainingArguments</code> の <code>load_best_model_at_end=args.load_best_model_at_end</code>（144行）を
+            <code>load_best_model_at_end=True</code> にする。</li>
+          <li>他の引数・ハイパラ・<code>TrainingArguments</code> の他のフィールドは一切変更しない。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="2">
+      <li>
+        <h3>Step 2: <code>train_promptsmiles.py</code> に同一の変更を行う</h3>
+        <p><strong>対象ファイル:</strong> <code>src/train_model/train_promptsmiles.py</code></p>
+        <p><strong>変更内容:</strong> Step 1 と完全に同じ。</p>
+        <ul>
+          <li><code>parse_args()</code> 内の <code>--load_best_model_at_end</code> の
+            <code>add_argument</code>（109行）を削除する。</li>
+          <li><code>TrainingArguments</code> の <code>load_best_model_at_end=args.load_best_model_at_end</code>（152行）を
+            <code>load_best_model_at_end=True</code> にする。</li>
+          <li>SMILES ランダム化の挙動および他のハイパラは一切変更しない。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="3">
+      <li>
+        <h3>Step 3: 両 <code>.sh</code> から <code>--load_best_model_at_end</code> の行を削除する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/train_model/run_fraggpt.sh</code>,
+          <code>src/train_model/run_promptsmiles.sh</code></p>
+        <ul>
+          <li>末尾の <code>--load_best_model_at_end</code> 行を削除する。</li>
+          <li>削除により最終引数となる行（<code>--per_device_train_batch_size 32</code>）の行末の
+            継続文字 <code>\</code> を外す。</li>
+          <li><strong>この削除は必須</strong>。argparse から引数が消えるため、残すと
+            <code>unrecognized arguments: --load_best_model_at_end</code> で起動に失敗する。</li>
+          <li><code>.sh</code> の他の行（<code>FRAG_NAME</code> / <code>MODE</code> /
+            <code>WANDB_*</code> / コメント）は一切変更しない。</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 1, Step 2 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="4">
+      <li>
+        <h3>Step 4: 検証（メインエージェントが実施）</h3>
+        <p><strong>対象ファイル:</strong> 実行のみ（コード変更なし）</p>
+        <ul>
+          <li><code>.py</code> 2件の構文チェック、<code>.sh</code> 2件の <code>bash -n</code></li>
+          <li><code>load_best_model_at_end</code> を repo 内で grep し、残っているのが
+            <code>TrainingArguments(... load_best_model_at_end=True ...)</code> の2箇所だけであることを確認</li>
+          <li><code>python src/train_model/train_fraggpt.py --help</code> にフラグが出ないこと</li>
+          <li><code>.py</code> を<strong>フラグなしで直接起動</strong>して
+            <code>EarlyStoppingCallback</code> の assert を通過すること（極小データで数ステップ）</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 3 の後</p>
+      </li>
+    </article>
+  </ol>
+</section>
+</body>
+</html>

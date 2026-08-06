@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Plan: FragGPT の augment_fusmiles を文字列置換に簡素化 (2026-08-03)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; }
+  h1 { border-bottom: 2px solid #333; }
+  h2 { border-bottom: 1px solid #ccc; margin-top: 2em; }
+  .step { margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+  pre { background: #f4f4f4; padding: 1em; border-radius: 4px; overflow-x: auto; }
+  blockquote { border-left: 3px solid #ccc; margin-left: 0; padding-left: 1em; color: #555; }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid #ddd; padding: 0.5em; text-align: left; }
+  th { background: #f4f4f4; }
+  .warn { background: #fff8e1; border: 1px solid #ffe082; padding: 1em; border-radius: 4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plan: FragGPT の augment_fusmiles を文字列置換に簡素化</h1>
+  <p class="meta">Date: 2026-08-03 | Status: pending-approval</p>
+  <p class="meta">調査元セッション: PromptSMILES ベースライン実装セッション（<code>.plans_for_ai/2026-07-28/add_promptsmiles_baseline.md</code>）<br>
+  引き継ぎ理由: 対象ファイルが FragGPT セッションの担当のため、調査結果のみを渡す</p>
+</header>
+
+<section id="overview">
+  <h2>概要</h2>
+  <p><code>src/func/fragment_for_fraggpt.py</code> の <code>augment_fusmiles()</code> は、結合点の付番をランダム置換するために
+  <strong>フラグメントを RDKit の Mol に変換して <code>SetIsotope</code> で書き換え、<code>MolToSmiles</code> で書き戻している</strong>。</p>
+  <p>調査の結果、この Mol 変換は<strong>論文にも本家実装にも根拠がなく、不要</strong>であることが分かった。
+  正規表現による文字列置換で置き換えられ、<strong>約30倍高速</strong>になる。</p>
+</section>
+
+<section id="evidence">
+  <h2>調査結果（すべて実測・一次情報）</h2>
+
+  <h3>1. 論文が定める augmentation は2つだけ</h3>
+  <p>FragGPT 論文（Yue et al., <em>Chem. Sci.</em> 2024, DOI: 10.1039/d4sc03744h）:</p>
+  <blockquote>
+    <p>"randomly transforming the <strong>i</strong> value within (1 ~ n), so that the break point identification of each fragment has a probability of any value in (1 ~ n)"</p>
+    <p>"by randomly <strong>shuffling</strong> molecular fragments, allowing the fragments to be in any position in the sequence"</p>
+    <p>"Both data augmentations are carried out simultaneously to further enrich the diversity of data"</p>
+  </blockquote>
+  <p>→ <strong>①付番のランダム置換 と ②フラグメント順のシャッフル のみ。再カノニカル化については論文に一切記述がない。</strong></p>
+
+  <h3>2. 本家実装も文字列置換を使っている</h3>
+  <p>公開リポジトリ: <code>https://github.com/pengbingxin/FragGPT-Interface</code>
+  （学習側コードは非公開。<code>task/__init__.py</code> が import する <code>datasets/</code> はリポジトリに含まれない。推論側の <code>generate_frag_pocket.py</code> に同等の処理がある）</p>
+<pre># generate_frag_pocket.py 257-259行
+pat = r'\[(\d+)\*\]'
+new_frags_list_1 = []
+for m, frag in enumerate(frags_list_1):
+    new_frags_list_1.append(re.sub(pat, lambda match: f"[{int(match.group(1))+1}*]" if int(match.group(1)) &gt; select_id else match.group(0), frag))</pre>
+<pre># generate_frag_pocket.py 245, 278, 327, 364行（フラグメント順シャッフル）
+np.random.shuffle(ori_frags_list)</pre>
+  <p>→ <strong>付番は <code>re.sub</code> による文字列置換、順序はリストの <code>shuffle</code>。Mol への変換は行っていない。</strong></p>
+
+  <h3>3. Mol 変換は化学的に何も追加していない（実測）</h3>
+  <p><code>data/fraggpt/brics/normal</code> の train split 2,000集合 × seed 3通り = 6,000件で検証:</p>
+  <table>
+    <tr><th>検証</th><th>結果</th></tr>
+    <tr><td>現行 Mol版 と 文字列置換版 が化学的に同一か</td><td><strong>6,000件すべて一致</strong>（不一致0）</td></tr>
+    <tr><td>現行 Mol版 と「文字列置換+再カノニカル化」が文字列として一致するか</td><td><strong>6,000件すべて一致</strong>（不一致0）</td></tr>
+  </table>
+  <p>つまり Mol 変換の唯一の効果は <code>MolToSmiles</code> による<strong>再カノニカル化</strong>（原子の書き順の変化）であり、これは論文にも本家にもない副作用。</p>
+
+  <h3>4. 速度（実測）</h3>
+  <table>
+    <tr><th>実装</th><th>2,000集合</th><th>全1,714,298集合の推定</th></tr>
+    <tr><td>現行 Mol版</td><td>0.65 秒</td><td><strong>9.3 分</strong></td></tr>
+    <tr><td>文字列置換 + 再カノニカル化</td><td>0.55 秒</td><td>7.9 分</td></tr>
+    <tr><td><strong>文字列置換のみ</strong></td><td><strong>0.02 秒</strong></td><td><strong>0.3 分</strong></td></tr>
+  </table>
+</section>
+
+<section id="plan">
+  <h2>実装計画</h2>
+  <ol>
+    <article class="step" data-step="1">
+      <li>
+        <h3>Step 1: <code>augment_fusmiles</code> を文字列置換に置き換える</h3>
+        <p><strong>対象ファイル:</strong> <code>src/func/fragment_for_fraggpt.py</code></p>
+        <p><strong>変更内容:</strong> 現行の Mol ベース実装（192-222行付近）を以下に置き換える。</p>
+<pre>ATTACHMENT_LABEL = re.compile(r"\[(\d+)\*\]")
+
+def augment_fusmiles(fragments: list[str], rng: random.Random) -&gt; list[str]:
+    labels = sorted({int(m) for f in fragments for m in ATTACHMENT_LABEL.findall(f)})
+    new_labels = list(range(1, len(labels) + 1))
+    rng.shuffle(new_labels)
+    relabeling = {str(o): str(n) for o, n in zip(labels, new_labels)}
+    augmented = [ATTACHMENT_LABEL.sub(lambda m: f"[{relabeling[m.group(1)]}*]", f) for f in fragments]
+    rng.shuffle(augmented)
+    return augmented</pre>
+        <p><strong>実装上の必須要件（いずれも実データで検証済み）:</strong></p>
+        <ul>
+          <li><strong>同時置換であること</strong>。逐次 <code>str.replace</code> だと <code>1→2</code> の後に <code>2→1</code> を適用して壊れる。<code>re.sub</code> にコールバックを渡す形なら1パスで置換されるため安全。</li>
+          <li><strong>正規表現は <code>\[(\d+)\*\]</code></strong>（<code>\]</code> まで含める）。含めないと <code>[10*]</code> を <code>[1*]</code> と誤マッチする。</li>
+          <li><strong>フラグメント順のシャッフルは現行のまま維持</strong>（<code>rng.shuffle(augmented)</code>）。ここは本家とも一致しており変更不要。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+    <article class="step" data-step="2">
+      <li>
+        <h3>Step 2: 不要になった依存の整理</h3>
+        <p><strong>対象ファイル:</strong> <code>src/func/fragment_for_fraggpt.py</code></p>
+        <p><strong>変更内容:</strong> <code>augment_fusmiles</code> が <code>parse_fragments</code> / <code>DUMMY_ATOMIC_NUM</code> / <code>Chem</code> を使わなくなるため、他から参照されていなければ import や定数を整理する。<strong>他の関数がまだ使っている場合は残すこと</strong>（同ファイル内の他関数を要確認）。</p>
+        <p><strong>依存関係:</strong> Step 1 の後</p>
+      </li>
+    </article>
+    <article class="step" data-step="3">
+      <li>
+        <h3>Step 3: docstring の更新</h3>
+        <p><strong>対象ファイル:</strong> <code>src/func/fragment_for_fraggpt.py</code></p>
+        <p><strong>変更内容:</strong> docstring の <code>Raises: ValueError: If RDKit cannot parse one of the fragments.</code> を削除する（パースしなくなるため）。教える2つの不変性の説明はそのまま維持。</p>
+        <p><strong>依存関係:</strong> Step 1 の後</p>
+      </li>
+    </article>
+  </ol>
+</section>
+
+<section id="decision">
+  <h2>判断が必要な点</h2>
+  <p><strong>SMILES の検証（<code>parse_fragments</code>）がなくなる。</strong></p>
+  <ul>
+    <li>本家も検証していない</li>
+    <li>入力は <code>make_datasets.py</code> が生成した <code>data/fraggpt/{frag}/normal</code> の <code>full_fragments</code> 列で、上流でキュレーション済み</li>
+    <li>PromptSMILES 側でも同じ理由で <code>Chem.MolFromSmiles</code> の None チェックを省く判断をしている（<code>.plans_for_ai/2026-07-28/add_promptsmiles_baseline.md</code> 参照）</li>
+  </ul>
+  <p>→ 同じ前提で問題ないと考えるが、FragGPT セッション側で判断されたい。</p>
+</section>
+
+<section id="note">
+  <h2>注意</h2>
+  <div class="warn">
+    <p>本計画は<strong>調査結果の引き継ぎ</strong>であり、調査元セッションでは実装していない。対象ファイルが FragGPT セッションの担当であり、並行編集による競合を避けるため。</p>
+    <p>実装する場合は、Step 1 の「実装上の必須要件」の3点を必ず満たすこと。</p>
+  </div>
+</section>
+</body>
+</html>

@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Plan: gen_safe_denovo.py を部分SAFE→完全SAFE直接生成に書き換え (2026-07-31 rev.2)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; }
+  h1 { border-bottom: 2px solid #333; }
+  .step { margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+  pre { background: #f4f4f4; padding: 0.8em; border-radius: 4px; overflow-x: auto; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; margin: 1em 0; width: 100%; }
+  th, td { border: 1px solid #ddd; padding: 0.4em 0.8em; text-align: left; vertical-align: top; }
+  th { background: #f4f4f4; }
+  .ask { background: #fffbe6; border-left: 4px solid #e6c200; padding: 0.8em 1em; }
+  .warn { background: #fff0f0; border-left: 4px solid #d33; padding: 0.8em 1em; }
+  .ok { background: #f0f8f0; border-left: 4px solid #3a3; padding: 0.8em 1em; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plan: gen_safe_denovo.py を「部分SAFE→完全SAFE 直接生成」に全面書き換え</h1>
+  <p class="meta">Date: 2026-07-31 | Status: implemented (rev.4)</p>
+</header>
+
+<section id="post-implementation">
+  <h2>実装後の変更（rev.4、ユーザー指示による）</h2>
+  <table>
+    <tr><th>#</th><th>変更</th><th>理由</th></tr>
+    <tr><td>1</td><td>無効デコード時のセンチネルを <code>""</code> → <code>'safe_invalid'</code></td><td>生成は必ず何らかの文字列を返すため、実質的な問題は「SMILES に変換できるか」だけ。変換できなかったことを明示的に記録する。旧 <code>generation_safe_func.py:124,135,136</code> と同じセンチネルで、<code>loadGenSmiles</code> の <code>time_out|error</code> には一致しないため行は残り無効カウントになる</td></tr>
+    <tr><td>2</td><td>行コメントを2件のみに整理</td><td>「無駄なコメントは入れない」。コードから読み取れることは書かず、壊されると困る非自明な制約（左パディングの必要性、<code>index_col=0</code> 契約）だけ残す</td></tr>
+    <tr><td>3</td><td><code>_canonicalize_smiles</code> を削除し <code>func.evaluation_func.Smi2CanSmi</code> を利用</td><td>「既に存在する関数を新しく作らない」。<code>Smi2Mol</code> が None で <code>print</code> するため <code>if decoded else None</code> のガードを付ける（450万回ループでの出力汚染を回避）。未参照になった <code>from rdkit import Chem</code> も削除</td></tr>
+    <tr><td>4</td><td>出力から <code>full_safe</code> 列を削除</td><td>生成に使わず、<code>pass_safe</code> は <code>full_safe</code> の接頭辞ではないため文字列比較もできず、<code>sc3_check_genmol_results</code> も <code>target</code> と <code>fragment</code> しか読まない</td></tr>
+    <tr><td>5</td><td><code>--machine_id</code> / <code>--total_machines</code> とシャーディングを削除</td><td>ユーザー判断で不要。副次的に出力名が <code>predictions.csv</code> / <code>error_logs.csv</code> になり、<code>evaluation.py:83</code> が読む名前と一致するため、シャード結合処理が存在しない問題も解消する</td></tr>
+  </table>
+  <p>最終的な出力カラム: <code>target, pass_safe, fragment, safe_1..N, prediction_1..N</code></p>
+  <p>最終的な出力ファイル: <code>{output_dir}/predictions.csv</code>、<code>{output_dir}/error_logs.csv</code></p>
+</section>
+
+<section id="overview">
+  <h2>概要</h2>
+  <p><code>src/gen_safe_denovo.py</code> を全面的に上書きし、次の機能を持つスクリプトにする。</p>
+  <blockquote>学習済み SAFE-GPT モデルに、test split の <code>pass_safe</code>（部分的な SAFE 文字列）を
+  プレフィックスとして与え、<code>model.generate()</code> を直接呼んで完全な SAFE 文字列を生成する。</blockquote>
+  <p><code>SAFEDesign</code> の高レベル生成API（<code>linker_generation</code> / <code>scaffold_decoration</code> /
+  <code>scaffold_morphing</code> / <code>de_novo_generation</code>）は一切使わない。
+  <strong>実装様式は <code>src/func/generation_rffmg_func.py</code> に揃える。</strong></p>
+
+  <h3>ユーザー確定事項</h3>
+  <table>
+    <tr><th>論点</th><th>決定</th></tr>
+    <tr><td>位置づけ</td><td>まず単体スクリプト。後日 <code>generation_safe_func.py</code> の置き換えに発展させる前提</td></tr>
+    <tr><td>出力</td><td>生成された完全SAFE文字列と、<code>safe.decode</code> した canonical SMILES の<strong>両方</strong></td></tr>
+    <tr><td><code>safe.decode()</code></td><td>使用可（禁止は <code>SAFEDesign</code> の生成APIのみ）</td></tr>
+    <tr><td>デコード方法</td><td>beam search（<code>num_beams=50</code>, <code>num_return_sequences=50</code>, <code>do_sample=False</code>）</td></tr>
+    <tr><td>設計案</td><td>案B（左パディングによるバッチ生成 + argparse + シャーディング配線済み）</td></tr>
+    <tr><td>対象行数</td><td>test split 全行（既に <code>subsample_test_split</code> で間引き済み）</td></tr>
+    <tr><td>実装様式</td><td><strong><code>generation_rffmg_func.py</code> に揃える</strong></td></tr>
+    <tr><td><code>max_position_embeddings</code></td><td>ロード時にチェックし、<code>max_length</code> が超える場合は警告する</td></tr>
+  </table>
+
+  <h3>調査で確定した事実（実装の根拠）</h3>
+  <ol>
+    <li><strong>モデルは <code>full_safe</code> のみを無条件に自己回帰学習</strong>している（<code>safe-train --text_column full_safe</code>）。よって「妥当なSAFEの途中文字列を与えて続きを生成させる」推論は学習分布と整合する。</li>
+    <li><strong><code>pass_safe</code> は <code>full_safe</code> の文字列接頭辞とは限らない</strong>。実測（全 13,173,912 行）で <strong>76.5% が非接頭辞</strong>、15.7% が接頭辞（断片境界）、7.8% が完全一致。→ 生成には支障ないが、<strong>「生成SAFE == full_safe」の文字列一致での評価は成立しない</strong>。</li>
+    <li><strong>プロンプト末尾に EOS を付けてはいけない</strong>。<code>SAFETokenizer.get_pretrained()</code> は <code>TemplateProcessing(single="[CLS] $A [SEP]")</code> で BOS/EOS を自動付与する。→ rffmg と同じく <strong><code>add_special_tokens=False</code> + <code>bos_id</code> 手動付与</strong>で回避する。</li>
+    <li><strong><code>safe.decode()</code> の既定は <code>ignore_errors=False</code>（例外送出）</strong>。<code>ignore_errors=True</code> の明示が必要。</li>
+    <li><strong>safe ライブラリは1プロンプトずつしか生成しない</strong>（<code>sample.py:1009</code> は文字列1本のみ受け取る）。バッチ化は本スクリプトの追加要素。</li>
+    <li><strong>test split 行数</strong>: brics 82,441 / rc_cms 90,974。シャーディングを最初から配線する。</li>
+  </ol>
+
+  <h3>generation_rffmg_func.py から踏襲する点</h3>
+  <div class="ok">
+  <table>
+    <tr><th>項目</th><th>rffmg の実装</th><th>参照</th></tr>
+    <tr><td>pad 設定</td><td><code>pad_token_id is None</code> なら <code>pad_token = eos_token</code></td><td>L70-71</td></tr>
+    <tr><td>padding_side</td><td><code>tokenizer.padding_side = "left"</code> を明示（コメント付き）</td><td>L72-73</td></tr>
+    <tr><td>トークナイズ</td><td><code>tokenizer(..., add_special_tokens=False)</code> + <code>bos_id</code> 手動付与</td><td>L92-93</td></tr>
+    <tr><td>パディング</td><td>手動で左詰め（<code>[pad_id] * 不足 + ids</code>）、<code>attention_mask</code> も手組み</td><td>L94-99</td></tr>
+    <tr><td>生成</td><td><code>torch.no_grad()</code> 内で <code>do_sample=False, num_beams, num_return_sequences, max_length, early_stopping=True, pad_token_id, eos_token_id</code></td><td>L101-110</td></tr>
+    <tr><td>デコード</td><td><code>batch_decode(outputs, skip_special_tokens=True)</code> → <code>n_samples</code> 本ずつグループ化</td><td>L112-116</td></tr>
+    <tr><td>バッチループ</td><td><code>tqdm(range(0, len(sources), args.batch_size))</code></td><td>L86</td></tr>
+    <tr><td><code>set_seed</code></td><td><code>from transformers import set_seed</code>（<code>func.utility</code> ではない）</td><td>L19, L63</td></tr>
+    <tr><td><code>batch_size</code> 既定</td><td><strong>24</strong></td><td>L55-56</td></tr>
+    <tr><td>構成</td><td><code>read_*</code> / <code>parse_args</code> / <code>main</code> のみ。CLI は argparse</td><td>全体</td></tr>
+  </table>
+  </div>
+
+  <h3>rffmg から意図的に外す点（理由つき）</h3>
+  <div class="warn">
+  <table>
+    <tr><th>項目</th><th>rffmg</th><th>本計画</th><th>理由</th></tr>
+    <tr><td><strong>CSV の index</strong></td><td><code>to_csv(..., index=False)</code></td><td><strong><code>index=False</code> を付けない</strong></td><td><code>evaluation_func.loadGenSmiles</code> は <code>safe_gpt</code> 分岐で <code>pd.read_csv(file_name, index_col=0)</code> と読む（L45）。rffmg は T5Chem 列様式で別分岐のため <code>index=False</code> でよいが、SAFE で揃えると列が1つずれる</td></tr>
+    <tr><td>補完部分の切り出し</td><td><code>text.split("&gt;&gt;", 1)[1]</code> で後半のみ取る</td><td><strong>切り出さない</strong></td><td>欲しいのは完全SAFE（プロンプト＋続き）そのもの。<code>skip_special_tokens=True</code> で <code>[CLS]</code>/<code>[SEP]</code>/PAD が落ち、そのまま完全SAFE文字列になる</td></tr>
+    <tr><td>シャーディング</td><td>なし</td><td><code>--machine_id</code> / <code>--total_machines</code> を追加</td><td>9万行を複数マシンで分担する必要があるため。既存 <code>gen_mols/gen_safe.py</code> が渡す引数名に一致させる</td></tr>
+    <tr><td>エラー処理</td><td>なし（例外で全体停止）</td><td>バッチ単位 <code>try/except</code> + <code>error_logs_{machine_id}.csv</code></td><td>数時間〜十数時間の実行で1バッチの失敗が全損になるのを避けるため</td></tr>
+    <tr><td>出力カラム</td><td><code>target</code> + <code>prediction_1..N</code></td><td><code>+ full_safe, pass_safe, fragment, safe_1..N</code></td><td>生SAFEの保存がユーザー要件。<code>fragment</code> は <code>sc3_check_genmol_results</code> が要求</td></tr>
+  </table>
+  </div>
+</section>
+
+<section id="plan">
+  <h2>実装計画</h2>
+  <p>対象ファイルは <strong><code>src/gen_safe_denovo.py</code> のみ</strong>（全面上書き）。他ファイルは変更しない。</p>
+  <ol>
+    <article class="step" data-step="1">
+      <li>
+        <h3>Step 1: モジュールヘッダと import を差し替える</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_safe_denovo.py</code>（冒頭）</p>
+        <ul>
+          <li>モジュール docstring を新規に書く（rffmg の docstring L1-11 と同じ粒度）。「<code>SAFEDesign</code> の高レベル生成APIを使わず <code>model.generate()</code> を直接呼ぶ」「<code>safe.decode</code> は SAFE→SMILES 変換にのみ使う」「プロンプトは <code>[CLS] pass_safe</code>、出力は完全SAFE文字列」を明記。</li>
+          <li><code>from safe.sample import SAFEDesign</code> を<strong>削除</strong>。</li>
+          <li>import 追加: <code>argparse</code>, <code>numpy as np</code>, <code>datasets</code>, <code>tqdm.tqdm</code>, <code>transformers.set_seed</code>（rffmg に合わせ <code>func.utility.set_seed</code> から変更）, <code>transformers.PreTrainedTokenizerBase</code>（型ヒント用）。</li>
+          <li><code>from func.utility import set_seed</code> を削除。</li>
+          <li>import順は 標準 → サードパーティ → ローカル を維持。<code>os.environ['CUDA_VISIBLE_DEVICES'] = '0'</code> は据え置き。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="2">
+      <li>
+        <h3>Step 2: モデル/トークナイザのロード関数を追加する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_safe_denovo.py</code></p>
+<pre><code>def load_model_and_tokenizer(
+    model_path: str | Path,
+    max_length: int,
+) -> tuple[SAFEDoubleHeadsModel, PreTrainedTokenizerBase, torch.device]:
+    """学習済み SAFE-GPT モデルと HuggingFace トークナイザをロードする。"""</code></pre>
+        <p>処理（rffmg L66-77 に対応）:</p>
+        <ol>
+          <li><code>SAFEDoubleHeadsModel.from_pretrained(str(model_path))</code></li>
+          <li><code>SAFETokenizer.from_pretrained(str(model_path)).get_pretrained()</code></li>
+          <li><code>tokenizer.pad_token_id is None</code> なら <code>tokenizer.pad_token = tokenizer.eos_token</code></li>
+          <li><code>tokenizer.padding_side = "left"</code>（rffmg L72-73 と同じくコメント付きで明示）</li>
+          <li><strong><code>max_length &gt; model.config.max_position_embeddings</code> なら警告を print する</strong>（位置埋め込みの上限超過を検知）</li>
+          <li>device を決めて <code>model.to(device)</code> / <code>model.eval()</code>、<code>print(f"Using device: {device}")</code></li>
+          <li><code>(model, tokenizer, device)</code> を返す</li>
+        </ol>
+        <p><strong>依存関係:</strong> Step 1 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="3">
+      <li>
+        <h3>Step 3: test split の読み込み・シャーディング関数を追加する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_safe_denovo.py</code></p>
+<pre><code>def load_test_split(
+    dataset_dir: str | Path,
+    machine_id: int = 0,
+    total_machines: int = 1,
+    n_generate: int | None = None,
+) -> pd.DataFrame:
+    """test split を読み込み、担当マシン分の行だけを DataFrame で返す。
+
+    Returns:
+        pd.DataFrame: カラムは ['smiles', 'full_safe', 'pass_safe',
+            'full_fragments', 'pass_fragments']。index は元の test split の行番号。
+    """</code></pre>
+        <ol>
+          <li><code>datasets.load_from_disk(str(dataset_dir))["test"]</code></li>
+          <li><code>n_generate</code> 指定時は先頭 <code>n_generate</code> 行に絞る（既定 <code>None</code> = 全行）</li>
+          <li><code>np.array_split(np.arange(n_rows), total_machines)[machine_id]</code> で担当行を決める</li>
+          <li><code>test_dataset.select(indices).to_pandas()</code> で DataFrame 化し、<strong>index に元の行番号を設定</strong></li>
+        </ol>
+        <p class="warn">注: 現行 <code>generation_safe_func.py</code> の <code>test_dataset['smiles'][indices]</code>（list を ndarray で添字）は <code>TypeError</code> になる。<code>select()</code> を使うことでこのバグを踏まない。</p>
+        <p><strong>依存関係:</strong> Step 1 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="4">
+      <li>
+        <h3>Step 4: プロンプト構築（左パディング）関数を追加する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_safe_denovo.py</code></p>
+<pre><code>def encode_prefixes(
+    prefixes: list[str],
+    tokenizer: PreTrainedTokenizerBase,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """部分SAFE文字列を左パディングしてモデル入力テンソルに変換する。
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor]: (input_ids, attention_mask)。
+    """</code></pre>
+        <p><strong>rffmg L92-99 と同じ手順</strong>:</p>
+        <ol>
+          <li><code>tokenizer(prefixes, add_special_tokens=False)</code></li>
+          <li>各系列の先頭に <code>tokenizer.bos_token_id</code>（= <code>[CLS]</code>）を付ける → <code>[CLS] &lt;prefix&gt;</code></li>
+          <li>バッチ内最大長に手動で左詰めし、<code>attention_mask</code> を組む</li>
+          <li><code>torch.tensor(..., dtype=torch.long, device=device)</code> で返す</li>
+        </ol>
+        <p>docstring に「末尾 EOS を付けない理由」を明記する（safe ライブラリの <code>sample.py:1039-1042</code> の <code>[:, :-1]</code> と同じ意図であること）。</p>
+        <p><strong>依存関係:</strong> Step 1 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="5">
+      <li>
+        <h3>Step 5: 生成関数を追加する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_safe_denovo.py</code></p>
+<pre><code>def generate_safe_sequences(
+    model: SAFEDoubleHeadsModel,
+    tokenizer: PreTrainedTokenizerBase,
+    prefixes: list[str],
+    n_samples: int,
+    num_beams: int,
+    max_length: int,
+    device: torch.device,
+) -> list[list[str]]:
+    """部分SAFEのバッチから beam search で完全SAFE文字列を生成する。
+
+    Returns:
+        list[list[str]]: 入力プレフィックスごとに n_samples 本の完全SAFE文字列。
+    """</code></pre>
+        <p><strong>rffmg L101-116 と同じ手順</strong>:</p>
+        <ol>
+          <li><code>encode_prefixes(...)</code></li>
+          <li><code>with torch.no_grad():</code> で <code>model.generate(input_ids=..., attention_mask=..., do_sample=False, num_beams=num_beams, num_return_sequences=n_samples, max_length=max_length, early_stopping=True, pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id)</code></li>
+          <li><code>tokenizer.batch_decode(outputs, skip_special_tokens=True)</code></li>
+          <li><code>n_samples</code> 本ずつグループ化して行ごとのリストに戻す</li>
+        </ol>
+        <p><strong>rffmg と違い <code>"&gt;&gt;"</code> での切り出しは行わない</strong>（欲しいのは完全SAFE全体のため）。</p>
+        <p><strong>依存関係:</strong> Step 4 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="6">
+      <li>
+        <h3>Step 6: SAFE→SMILES デコード関数を整理する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_safe_denovo.py</code>（現行 L17-43）</p>
+        <p><strong>変更内容:</strong> 現行の <code>_canonicalize_smiles</code> と <code>_decode_safe_smiles</code> を<strong>そのまま残す</strong>（<code>safe.decode(..., ignore_errors=True, ...)</code> + <code>Chem.MolFromSmiles</code> の None チェック済みで、safe ライブラリの <code>_decode_safe</code>（<code>sample.py:844-853</code>）と同一の引数）。<code>_decode_safe_smiles</code> の docstring に「空文字列・デコード失敗時は None を返す」ことを追記する。</p>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="7">
+      <li>
+        <h3>Step 7: 結果 DataFrame 構築関数を追加する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_safe_denovo.py</code></p>
+<pre><code>def build_predictions_df(
+    test_df: pd.DataFrame,
+    generated_safe: list[list[str]],
+    n_samples: int,
+) -> pd.DataFrame:
+    """生成結果を保存用の DataFrame に組み立てる。
+
+    Returns:
+        pd.DataFrame: カラムは ['target', 'full_safe', 'pass_safe', 'fragment']
+            + ['safe_1', ..., f'safe_{n_samples}']（生成された完全SAFE文字列）
+            + ['prediction_1', ..., f'prediction_{n_samples}']（canonical SMILES、
+            無効な場合は空文字列）。index は元の test split の行番号。
+    """</code></pre>
+        <table>
+          <tr><th>列</th><th>内容</th><th>由来</th></tr>
+          <tr><td>(index)</td><td>test split の行番号</td><td><code>load_test_split</code></td></tr>
+          <tr><td><code>target</code></td><td>参照分子の SMILES</td><td><code>smiles</code></td></tr>
+          <tr><td><code>full_safe</code></td><td>正解の完全SAFE（参考用）</td><td><code>full_safe</code></td></tr>
+          <tr><td><code>pass_safe</code></td><td>入力したプレフィックス</td><td><code>pass_safe</code></td></tr>
+          <tr><td><code>fragment</code></td><td>断片集合（<code>sc3_check_genmol_results</code> が要求）</td><td><code>pass_fragments</code></td></tr>
+          <tr><td><code>safe_1..N</code></td><td><strong>生成された完全SAFE文字列</strong></td><td><code>generate_safe_sequences</code></td></tr>
+          <tr><td><code>prediction_1..N</code></td><td>上を <code>_decode_safe_smiles</code> した canonical SMILES</td><td>変換不可なら <code>'safe_invalid'</code></td></tr>
+        </table>
+        <p class="warn"><strong><code>safe_i</code> という列名にするのは必須</strong>。<code>safe_prediction_i</code> にすると <code>loadGenSmiles</code>（列名に <code>prediction</code> を<strong>部分一致</strong>で含む列を拾う）に巻き込まれる。</p>
+        <p class="warn"><strong>無効時は空文字列ではなく <code>'safe_invalid'</code> を入れる</strong>（ユーザー指示 rev.3）。生成は必ず何らかの文字列を返すため、実際に問題になるのは「その文字列を SMILES に変換できるか」だけである。変換できなかったことを明示的に記録する。旧 <code>generation_safe_func.py:124,135,136</code> と同じセンチネル。<code>'safe_invalid'</code> は <code>loadGenSmiles</code> の <code>time_out|error</code> 正規表現に一致しないため、行は除外されず RDKit のパース失敗により<strong>無効カウント</strong>になる（旧実装と同じ挙動）。</p>
+        <p><strong>依存関係:</strong> Step 5、Step 6 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="8">
+      <li>
+        <h3>Step 8: <code>parse_args</code> と <code>main</code> を追加する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_safe_denovo.py</code></p>
+        <p>rffmg の <code>parse_args</code>（L38-59）/ <code>main</code>（L62-126）と同じ構成で追加する。</p>
+        <table>
+          <tr><th>引数</th><th>既定</th><th>備考</th></tr>
+          <tr><td><code>--model_path</code></td><td>必須</td><td>rffmg と同じ</td></tr>
+          <tr><td><code>--dataset_dir</code></td><td>必須</td><td>SAFE は DatasetDict なので rffmg の <code>--dataset_file</code>/<code>--target_file</code> ではなくこちら</td></tr>
+          <tr><td><code>--output_dir</code></td><td>必須</td><td>rffmg と同じ</td></tr>
+          <tr><td><code>--n_samples</code></td><td>50</td><td>rffmg と同じ</td></tr>
+          <tr><td><code>--num_beams</code></td><td>50</td><td>rffmg と同じ</td></tr>
+          <tr><td><code>--max_length</code></td><td>200</td><td>既存 SAFE パイプライン（<code>gen_safe.sh</code>）の値。rffmg は 256</td></tr>
+          <tr><td><code>--batch_size</code></td><td><strong>24</strong></td><td>rffmg に合わせる</td></tr>
+          <tr><td><code>--random_seed</code></td><td>42</td><td>rffmg と同じ</td></tr>
+          <tr><td><code>--n_generate</code></td><td>None</td><td>追加（動作確認用。既定は全行）</td></tr>
+          <tr><td><code>--machine_id</code></td><td>0</td><td>追加（<code>gen_mols/gen_safe.py</code> が渡す引数名に一致）</td></tr>
+          <tr><td><code>--total_machines</code></td><td>1</td><td>追加</td></tr>
+        </table>
+        <p><code>main</code> の処理:</p>
+        <ol>
+          <li><code>set_seed(args.random_seed)</code>（<code>transformers.set_seed</code>）</li>
+          <li><code>load_model_and_tokenizer</code> / <code>load_test_split</code></li>
+          <li><code>tqdm(range(0, len(test_df), args.batch_size), desc='prediction')</code> でバッチループ。各バッチを <code>try/except</code> で囲み、例外時はそのバッチ全行の <code>safe_i</code> を <code>"error"</code> で埋めて継続し、例外を <code>error_logs</code> に記録する</li>
+          <li><code>build_predictions_df</code> → <code>{output_dir}/predictions_{machine_id}.csv</code> に保存。<strong><code>index=False</code> は付けない</strong>（<code>loadGenSmiles</code> の <code>index_col=0</code> 契約に合わせるため。rffmg とは異なる点なので理由をコメントで明記）</li>
+          <li><code>error_logs</code> を <code>{output_dir}/error_logs_{machine_id}.csv</code> に保存（カラム: <code>['row_index', 'target', 'pass_safe', 'error_type', 'error_message']</code>）</li>
+          <li>保存先を <code>print</code> する（rffmg L125-126 と同じ体裁）</li>
+        </ol>
+        <p><strong>依存関係:</strong> Step 7 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="9">
+      <li>
+        <h3>Step 9: <code>__main__</code> を差し替える</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_safe_denovo.py</code>（現行 L153-165）</p>
+<pre><code>if __name__ == "__main__":
+    main()</code></pre>
+        <p>rffmg L129-130 と同じ形。</p>
+        <p><strong>依存関係:</strong> Step 8 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="10">
+      <li>
+        <h3>Step 10: 削除される要素の確認と構文チェック</h3>
+        <p><strong>対象ファイル:</strong> なし（検証のみ）</p>
+        <ul>
+          <li>削除されること: <code>generate_denovo_direct</code> / <code>generate_denovo_library</code> / <code>GENERATORS</code> / <code>run_denovo_generation</code> / <code>from safe.sample import SAFEDesign</code> / <code>from func.utility import set_seed</code></li>
+          <li><code>python -m py_compile src/gen_safe_denovo.py</code> が通ることを確認</li>
+          <li><code>grep -n "SAFEDesign\|de_novo\|linker_generation\|scaffold_" src/gen_safe_denovo.py</code> が空になることを確認</li>
+          <li>実際の生成実行（GPU・モデル要）は行わない</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 9 の後</p>
+      </li>
+    </article>
+  </ol>
+</section>
+
+<section id="pending">
+  <h2>未決事項</h2>
+  <div class="ask">
+    <ul>
+      <li><strong>ファイル名</strong>: 中身が de novo でなくなるため <code>gen_safe_denovo.py</code> という名前が実態と合わなくなる。「上書き」のご指示どおり据え置く前提。改名が望ましければ対応する。</li>
+      <li><strong><code>--max_length</code> の意味</strong>: <code>generate(max_length=)</code> はパディング込みの全長を数える。左パディングしたバッチでは、長いプレフィックスと同居した行の生成可能長が縮む。rffmg も同じ扱いなので、<strong>揃える方針に従い <code>max_length</code> のまま</strong>とする。</li>
+    </ul>
+  </div>
+</section>
+
+<section id="out-of-scope">
+  <h2>今回は触らないもの</h2>
+  <ul>
+    <li><code>src/func/generation_safe_func.py</code>（実行不能なバグ3件と <code>**kwargs</code> 渡し忘れによる beam→random フォールバックを確認済みだが、今回は手を付けない）</li>
+    <li><code>src/gen_mols/gen_safe.py</code> / <code>gen_safe.sh</code> / <code>src/func/generation_time.py</code></li>
+    <li><code>src/evaluation.py</code> / <code>src/func/evaluation_func.py</code></li>
+    <li>シャード出力（<code>predictions_{machine_id}.csv</code>）を <code>predictions.csv</code> に結合する処理（リポジトリ全体に存在しないことを確認済み。評価時に別途必要）</li>
+    <li>コミット（指示があるまで行わない）</li>
+  </ul>
+</section>
+</body>
+</html>

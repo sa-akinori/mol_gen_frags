@@ -12,8 +12,6 @@ from pathlib import Path
 from func.generation_time import run_and_record_time
 from func.utility import BASEPATH
 
-# FragGPT is decoded with beam search, the scheme RFFMG and SAFE are evaluated with.
-GEN_METHOD = 'beam'
 # FragGPT has no sampling_num / task level: the prompts are the shared SAFE test split.
 ADDITIONAL_PATH = 'normal'
 
@@ -28,12 +26,14 @@ if __name__=='__main__':
                         help='Model version (default: finetuning)')
 
     # Generation parameters
+    parser.add_argument('--gen_method', type=str, default='beam', choices=['beam', 'sampling'],
+                        help='Decoding scheme: beam search or multinomial sampling (default: beam)')
     parser.add_argument('--n_samples', type=int, default=50,
                         help='Number of samples to generate per molecule (default: 50)')
     parser.add_argument('--max_length', type=int, default=256,
                         help='Maximum sequence length (default: 256)')
     parser.add_argument('--num_beams', type=int, default=50,
-                        help='Number of beams for beam search (default: 50)')
+                        help='Number of beams, used by the beam gen_method (default: 50)')
     parser.add_argument('--batch_size', type=int, default=24,
                         help='Batch size (default: 24)')
     parser.add_argument('--random_seed', type=int, default=42)
@@ -43,15 +43,16 @@ if __name__=='__main__':
     frag_method = args.frag_method
     model_ver   = args.model_ver
     model_path  = f'{BASEPATH}/models/fraggpt/gpt/{model_ver}/{frag_method}/best_model'
-    output_dir  = f'{BASEPATH}/results/fraggpt/gpt/{model_ver}/{frag_method}/{GEN_METHOD}/{ADDITIONAL_PATH}'
+    output_dir  = f'{BASEPATH}/results/fraggpt/gpt/{model_ver}/{frag_method}/{args.gen_method}/{ADDITIONAL_PATH}'
     os.makedirs(output_dir, exist_ok=True)
 
-    # Generate compounds (beam search). predictions.csv holds the columns `target`,
-    # `prediction_1..N` so the shared evaluation pipeline can read it unchanged.
+    # predictions.csv holds the columns `target`, `prediction_1..N` so the shared evaluation
+    # pipeline can read it unchanged.
     cmd = [
         "python", f"{BASEPATH}/src/func/generation_fraggpt_func.py",
         "--frag_method", frag_method,
         "--model_ver", model_ver,
+        "--gen_method", args.gen_method,
         "--n_samples", str(args.n_samples),
         "--max_length", str(args.max_length),
         "--num_beams", str(args.num_beams),
@@ -67,6 +68,7 @@ if __name__=='__main__':
             "model_ver": model_ver,
             "frag_method": frag_method,
             "additional_path": ADDITIONAL_PATH,
+            "gen_method": args.gen_method,
             "num_beams": args.num_beams,
             "batch_size": args.batch_size,
             "model_path": model_path,

@@ -14,14 +14,10 @@ import argparse
 import ast
 import os
 import random
-import sys
-from pathlib import Path
 
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from func.utility import BASEPATH
-from make_datasets import load_file, save_file
+from func.utility import BASEPATH, load_file, save_file
 
 if __name__ == '__main__':
 

@@ -9,12 +9,15 @@ callbacks, both provided by :class:`GPT2PromptSampler`:
     - ``sample_fn(prompt, batch_size) -> list[str]``: sampled completions of a prompt.
     - ``evaluate_fn(smiles) -> negative log-likelihood`` of complete SMILES.
 
-The prompted fragments are read from the ``pass_fragments`` column of the shared test split
-(``data/safe/{frag_method}/normal``, test split), and the reference molecule is the ``smiles``
-column of the same row. RFFMG (``test.source``) and SAFE (``generation_safe_func.py``) both
-generate from that very column, so the three methods start from identical fragment sets. The
-fragment sets are deliberately *not* recomputed here: re-fragmenting the test molecules loses
-part of them and yields a fragment population the other two methods never saw.
+The prompted fragments are read from the ``pass_fragments`` column of the PromptSMILES dataset
+(``data/promptsmiles/{frag_method}/normal``, test split), and the reference molecule is the
+``smiles`` column of the same row. That dataset is written by ``make_datasets.py`` from the split
+SAFE uses, so its rows are identical to SAFE's; it is also the dataset the prior is trained on
+(``train_promptsmiles.py`` reads its ``train``/``validation`` splits). RFFMG (``test.source``) and
+SAFE (``generation_safe_func.py``) generate from that very column too, so the three methods start
+from identical fragment sets. The fragment sets are deliberately *not* recomputed here:
+re-fragmenting the test molecules loses part of them and yields a fragment population the other
+two methods never saw.
 
 Every test row is a generation target: instead of running one fixed task and skipping the rows
 whose fragment set does not fit it, each row is routed to the promptsmiles sampler that can
@@ -23,8 +26,8 @@ then scored on the same population.
 
 Outputs (read unchanged by ``src/evaluation.py``):
     - ``data/promptsmiles/{frag_method}/normal/test.source``: fragment set per test molecule.
-      The directory also holds the ``{train,val,test}.smi`` corpus written by
-      ``make_datasets.py``; the file names differ, so both sets of files live side by side.
+      This is the directory holding the dataset read above; ``save_to_disk`` leaves unrelated
+      files untouched (verified 2026-08-02), so the two files live next to the dataset.
     - ``data/promptsmiles/{frag_method}/normal/test.target``: the test molecule itself.
     - ``results/promptsmiles/gpt/{model_ver}/{frag_method}/{gen_method}/normal/predictions.csv``:
       columns ``target``, ``sampler``, ``prediction_1`` .. ``prediction_N`` (the T5Chem layout
@@ -85,7 +88,7 @@ from tqdm import tqdm
 from transformers import AutoTokenizer, GPT2LMHeadModel, PreTrainedTokenizerBase, set_seed
 
 from func.fragmentation import GetNHA
-from func.utility import BASEPATH, LogFile
+from func.utility import BASEPATH, LogFile, save_file
 
 # FragmentLinker needs at least two fragments to have something to link: with a single fragment
 # its `fragments.pop()` hits an emptied list and raises `IndexError: pop from empty list`, even
@@ -93,23 +96,13 @@ from func.utility import BASEPATH, LogFile
 MIN_LINK_FRAGMENTS = 2
 
 
-def save_file(target: str, save_path: str) -> None:
-    """Write a string to a UTF-8 text file with LF newlines.
-
-    Args:
-        target: Text to write.
-        save_path: Destination file path.
-    """
-    with open(save_path, "w", newline="\n", encoding="utf-8") as f:
-        f.write(target)
-
-
 def read_test_split(frag_method: str) -> tuple[list[str], list[str]]:
-    """Read the reference molecules and their prompted fragment sets from the shared split.
+    """Read the reference molecules and their prompted fragment sets from the PromptSMILES dataset.
 
-    The split is the one written by ``src/make_datasets.py`` and used by SAFE
-    (``generation_safe_func.py`` reads the same ``pass_fragments`` column) and, in its
-    isotope-stripped form, by RFFMG (``test.source``).
+    ``data/promptsmiles/{frag_method}/normal`` is written by ``src/make_datasets.py`` from the
+    same split SAFE uses (``generation_safe_func.py`` reads the same ``pass_fragments`` column)
+    and, in its isotope-stripped form, RFFMG (``test.source``), so the rows are shared across the
+    three methods while each method keeps its own copy of the data.
 
     Args:
         frag_method: Fragmentation method, either ``brics`` or ``rc_cms``.
@@ -118,7 +111,7 @@ def read_test_split(frag_method: str) -> tuple[list[str], list[str]]:
         Pair ``(smiles, pass_fragments)`` of equally long lists, aligned row by row: the
         reference molecule and its dot-separated fragment set.
     """
-    test_dataset = datasets.load_from_disk(f"{BASEPATH}/data/safe/{frag_method}/normal")["test"]
+    test_dataset = datasets.load_from_disk(f"{BASEPATH}/data/promptsmiles/{frag_method}/normal")["test"]
     return test_dataset["smiles"], test_dataset["pass_fragments"]
 
 

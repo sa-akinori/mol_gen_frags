@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Plan: FragGPT を HF DatasetDict 形式に追随させる (2026-08-02)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; }
+  h1 { border-bottom: 2px solid #333; }
+  h2 { border-bottom: 1px solid #ccc; margin-top: 2em; }
+  .step { margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+  table { border-collapse: collapse; margin: 1em 0; width: 100%; }
+  th, td { border: 1px solid #ddd; padding: 0.4em 0.7em; text-align: left; font-size: 0.95em; }
+  th { background: #f4f4f4; }
+  .warn { background: #fff3f3; border-left: 4px solid #d9534f; padding: 0.8em 1em; margin: 1em 0; }
+  .note { background: #eef6ff; border-left: 4px solid #4a90d9; padding: 0.8em 1em; margin: 1em 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plan: FragGPT を HF DatasetDict 形式に追随させる</h1>
+  <p class="meta">Date: 2026-08-02 | Status: pending-approval</p>
+</header>
+
+<section id="overview">
+  <h2>概要</h2>
+  <p><code>src/make_datasets.py</code> の未コミット変更により、PromptSMILES と FragGPT のデータ保存形式が
+  プレーンテキスト（<code>.smi</code> / <code>.target</code>）から <strong>HF <code>DatasetDict</code></strong> に変更された。
+  PromptSMILES 側（<code>train_promptsmiles.py</code> / <code>gen_promptsmiles.py</code>）は追随済みだが、
+  <strong>FragGPT 側と共有の <code>loadTrainSmiles</code> が追随しておらず、現状ではパイプラインが通らない。</strong></p>
+
+  <h3>現在の保存形式（<code>make_datasets.py:138-162</code>、<code>if args.sampling_num == 5:</code> 内）</h3>
+  <table>
+    <tr><th>データセット</th><th>パス</th><th>列</th></tr>
+    <tr><td>promptsmiles</td><td><code>data/promptsmiles/{frag}/normal</code></td><td>train/validation/test すべて <code>smiles</code>, <code>pass_fragments</code></td></tr>
+    <tr><td>fraggpt</td><td><code>data/fraggpt/{frag}/normal</code></td><td>train/validation: <code>smiles</code>, <code>full_fragments</code><br>test: <code>smiles</code>, <code>pass_fragments</code></td></tr>
+  </table>
+
+  <div class="warn">
+    <h3>現在壊れている箇所（実行すれば例外になる）</h3>
+    <table>
+      <tr><th>箇所</th><th>現在の実装</th><th>起きること</th></tr>
+      <tr><td><code>train_fraggpt.py:201-202</code></td><td><code>read_lines(data_dir / "train.smi")</code></td><td><code>FileNotFoundError</code>。<code>.smi</code> は生成されない</td></tr>
+      <tr><td><code>evaluation.py:64</code></td><td><code>tr_file_name = .../normal/train.target</code></td><td><code>FileNotFoundError</code>。<code>train.target</code> は生成されない</td></tr>
+      <tr><td><code>evaluation_func.py:32-33</code></td><td><code>arc_name=='t5chem'</code> → <code>pd.read_csv(file_name)</code></td><td><strong>PromptSMILES でも</strong> <code>IsADirectoryError</code>。<code>evaluation.py:57</code> がディレクトリを渡すため</td></tr>
+      <tr><td><code>generation_fraggpt_func.py:88</code></td><td><code>data/safe/{frag}/normal</code> の test split</td><td>動作はするが、fraggpt データセットに同じ列の test split があるのに外部を参照している</td></tr>
+    </table>
+  </div>
+
+  <h3>方針（ユーザー決定）</h3>
+  <ul>
+    <li><strong>FragGPT を HF 形式に合わせる</strong>（<code>make_datasets.py</code> は現状維持）</li>
+    <li><strong>PromptSMILES の <code>loadTrainSmiles</code> 問題も同時に直す</strong>（共通の原因のため）</li>
+  </ul>
+
+  <h3>設計判断: <code>loadTrainSmiles</code> の分岐をパス種別で行う</h3>
+  <p>現在は <code>arc_name</code> で分岐しているが、<code>arc_name</code> は「predictions.csv の形式」を表す軸であり、
+  「学習分子をどこから読むか」とは独立している。実際 PromptSMILES と FragGPT は
+  <code>arc_name='t5chem'</code>（T5Chem 形式の predictions.csv）でありながら、学習分子は HF データセットにある。</p>
+  <p>そこで <strong><code>os.path.isdir()</code> による分岐</strong>に変更する。現行の4手法すべてが正しく振り分けられる。</p>
+  <table>
+    <tr><th>手法</th><th><code>tr_file_name</code></th><th>種別</th><th>読み方</th></tr>
+    <tr><td>safe_gpt</td><td><code>data/safe/{frag}/normal</code></td><td>ディレクトリ</td><td><code>load_from_disk(...)['train']['smiles']</code>（現行と同一）</td></tr>
+    <tr><td>promptsmiles</td><td><code>data/promptsmiles/{frag}/normal</code></td><td>ディレクトリ</td><td>同上（<strong>新規に通るようになる</strong>）</td></tr>
+    <tr><td>fraggpt</td><td><code>data/fraggpt/{frag}/normal</code></td><td>ディレクトリ</td><td>同上（<strong>新規に通るようになる</strong>）</td></tr>
+    <tr><td>t5chem / gpt</td><td><code>data/rffmg/{frag}/normal/train.target</code></td><td>ファイル</td><td><code>pd.read_csv(...)</code>（現行と同一）</td></tr>
+  </table>
+  <p>safe_gpt / t5chem の挙動は変わらないため、SAFE・RFFMG の評価経路には影響しない。</p>
+</section>
+
+<section id="plan">
+  <h2>実装計画</h2>
+  <ol>
+    <article class="step" data-step="1">
+      <li>
+        <h3>Step 1: <code>loadTrainSmiles</code> をパス種別で分岐させる</h3>
+        <p><strong>対象ファイル:</strong> <code>src/func/evaluation_func.py</code></p>
+        <p><strong>変更内容:</strong></p>
+        <ul>
+          <li><code>loadTrainSmiles(arc_name, file_name)</code> の分岐を <code>arc_name</code> から
+            <strong><code>os.path.isdir(file_name)</code></strong> に変更する。
+            <ul>
+              <li>ディレクトリ → <code>datasets.load_from_disk(file_name)['train']['smiles']</code></li>
+              <li>ファイル → <code>pd.read_csv(file_name, header=None).squeeze().tolist()</code></li>
+            </ul>
+          </li>
+          <li>引数 <code>arc_name</code> は他の呼び出し規約（<code>loadGenSmiles</code> と対で使われる）との一貫性のため
+            <strong>シグネチャは変更しない</strong>。使わなくなる場合はその旨を docstring に明記する。</li>
+          <li>docstring を Google style で追加し、どの手法がどちらの経路を通るかを表で示す。</li>
+          <li>既存の <code>safe_gpt</code> / <code>t5chem</code> の挙動が変わらないことをコメントで明示する。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="2">
+      <li>
+        <h3>Step 2: <code>evaluation.py</code> の fraggpt 分岐をデータセットディレクトリに変更</h3>
+        <p><strong>対象ファイル:</strong> <code>src/evaluation.py</code></p>
+        <p><strong>変更内容:</strong></p>
+        <ul>
+          <li>fraggpt 分岐の <code>tr_file_name</code> を
+            <code>f'{BASEPATH}/data/fraggpt/{frag_method}/normal/train.target'</code> から
+            <code>f'{BASEPATH}/data/fraggpt/{frag_method}/normal'</code> に変更する（promptsmiles 分岐と同形）。</li>
+          <li><code>testInputfile</code> は変更しない（<code>generation_fraggpt_func.py</code> がデータセットディレクトリ内に
+            <code>test.source</code> を書き出す。promptsmiles と同じ作法）。</li>
+          <li>コメントを実態に合わせて更新する。</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 1 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="3">
+      <li>
+        <h3>Step 3: <code>train_fraggpt.py</code> を <code>load_from_disk</code> に移行</h3>
+        <p><strong>対象ファイル:</strong> <code>src/train_model/train_fraggpt.py</code></p>
+        <p><strong>変更内容:</strong></p>
+        <ul>
+          <li><code>train_promptsmiles.py</code> の <code>read_corpus()</code> に倣い、
+            <code>read_corpus(frag_method: str) -&gt; tuple[list[str], list[str]]</code> を追加する。
+            <code>datasets.load_from_disk(f"{BASEPATH}/data/fraggpt/{frag_method}/normal")</code> を読み、
+            <code>dataset["train"]["full_fragments"], dataset["validation"]["full_fragments"]</code> を返す。</li>
+          <li><code>read_lines()</code> が未使用になるため削除する。<code>pathlib.Path</code> の import も未使用になれば削除する。</li>
+          <li><code>import datasets</code> を追加する（import 順は 標準 → サードパーティ → ローカル を維持）。</li>
+          <li>docstring を実態に合わせる（<code>.smi</code> ではなく HF データセットの <code>full_fragments</code> 列を読む旨、
+            および <code>make_datasets.py</code> が <code>full_fragments</code> で重複排除済みである旨）。</li>
+          <li><strong>学習ロジック（無条件LM・拡張・ハイパラ）は一切変更しない。</strong></li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 1 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="4">
+      <li>
+        <h3>Step 4: <code>generation_fraggpt_func.py</code> の test split の読み元を変更</h3>
+        <p><strong>対象ファイル:</strong> <code>src/func/generation_fraggpt_func.py</code></p>
+        <p><strong>変更内容:</strong></p>
+        <ul>
+          <li><code>read_test_split()</code> の読み元を
+            <code>data/safe/{frag_method}/normal</code> から <strong><code>data/fraggpt/{frag_method}/normal</code></strong>
+            に変更する（<code>gen_promptsmiles.py:125</code> と同形）。列は <code>smiles</code> / <code>pass_fragments</code> で変更なし。</li>
+          <li>モジュール docstring と <code>read_test_split</code> の docstring を更新し、
+            fraggpt データセットの test split が <code>make_datasets.py</code> で <code>safe_te</code> から作られており、
+            SAFE・PromptSMILES・RFFMG と同一の行であることを明記する。</li>
+          <li><strong><code>make_datasets.py</code> を再実行すると <code>save_to_disk</code> がディレクトリを作り直すため、
+            生成済みの <code>test.source</code> / <code>test.target</code> が消える</strong>点をコメントで注意喚起する
+            （実行順序は データ生成 → 学習 → 生成 → 評価）。</li>
+          <li><strong>生成ロジック（付番・beam search・組立・行アラインメント）は一切変更しない。</strong></li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 1 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="5">
+      <li>
+        <h3>Step 5: <code>next_plan.md</code> の更新</h3>
+        <p><strong>対象ファイル:</strong> <code>next_plan.md</code></p>
+        <p><strong>変更内容:</strong> 2026-07-30 時点の記述が旧テキスト形式を前提にしているため、現状に合わせる。</p>
+        <ul>
+          <li>検証表の <code>data/promptsmiles/{frag}/normal/train.smi</code> /
+            <code>data/fraggpt/{frag}/normal/train.target</code> の行を、
+            HF データセットの split 行数に置き換える（promptsmiles train/validation/test、fraggpt train/validation/test）。</li>
+          <li>「<code>data/fraggpt/{frag}/normal/test.*</code> は意図的に生成されない」という記述を削除する
+            （現在は fraggpt データセット自体に test split が含まれる）。</li>
+          <li>保存形式が HF <code>DatasetDict</code> に統一されたことを追記する。</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 4 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="6">
+      <li>
+        <h3>Step 6: 小規模検証（メインエージェントが実施）</h3>
+        <p><strong>対象ファイル:</strong> 実行のみ（コード変更なし）</p>
+        <p><strong>変更内容:</strong> サンドボックスで以下を確認する。</p>
+        <ul>
+          <li>全変更ファイルの構文チェック</li>
+          <li>小さい HF DatasetDict を作り、<code>train_fraggpt.py</code> が読めること（数ステップ学習）</li>
+          <li><code>generation_fraggpt_func.py</code> が fraggpt データセットの test split から生成できること</li>
+          <li><code>loadTrainSmiles</code> が 4手法すべてのパス形（ディレクトリ / ファイル）で正しく動くこと</li>
+          <li><code>evaluation.py --model_name fraggpt</code> が最後まで通ること</li>
+          <li><strong>SAFE・RFFMG の評価経路が壊れていないこと</strong>（<code>loadTrainSmiles</code> は共有関数のため）</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 5 の後</p>
+      </li>
+    </article>
+  </ol>
+</section>
+
+<section id="out-of-scope">
+  <h2>スコープ外（今回やらないこと）</h2>
+  <ul>
+    <li><code>make_datasets.py</code> の変更（現状の HF 形式を正とする）</li>
+    <li><code>evaluation.py</code> 等の <code>sampling_num</code> 階層の欠落（<code>next_plan.md</code> に記載の保留項目）</li>
+    <li><code>data/dummy/</code> を参照する残置コード（<code>figure.py</code> / <code>check_reproducibility.py</code>）</li>
+    <li>FragGPT の仕様変更（付番方式・デコード方式・学習条件はすべて確定済みのまま）</li>
+  </ul>
+</section>
+
+<section id="note">
+  <h2>注意</h2>
+  <div class="note">
+    <p><code>data/fraggpt/</code> と <code>data/promptsmiles/</code> は<strong>まだ生成されていない</strong>。
+    本計画はコードを実データの形式に合わせる作業であり、データ生成はユーザーが実施する。</p>
+  </div>
+</section>
+</body>
+</html>

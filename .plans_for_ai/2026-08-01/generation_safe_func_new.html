@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Plan: generation_safe_func.py を新規作成し本番経路に接続 (2026-08-01)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; }
+  h1 { border-bottom: 2px solid #333; }
+  .step { margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+  pre { background: #f4f4f4; padding: 0.8em; border-radius: 4px; overflow-x: auto; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; margin: 1em 0; width: 100%; }
+  th, td { border: 1px solid #ddd; padding: 0.4em 0.8em; text-align: left; vertical-align: top; }
+  th { background: #f4f4f4; }
+  .ask { background: #fffbe6; border-left: 4px solid #e6c200; padding: 0.8em 1em; }
+  .warn { background: #fff0f0; border-left: 4px solid #d33; padding: 0.8em 1em; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plan: gen_safe_denovo.py を generation_safe_func.py として本番経路に組み込む</h1>
+  <p class="meta">Date: 2026-08-01 | Status: pending-approval</p>
+</header>
+
+<section id="overview">
+  <h2>概要</h2>
+  <p><code>src/gen_safe_denovo.py</code> の内容を <code>src/func/generation_safe_func.py</code> として新規作成し、<code>src/gen_mols/gen_safe.py</code> → <code>run_and_record_time</code> → subprocess の本番経路に接続する。旧実装は既にユーザーによって <code>generation_safe_func_old.py</code> にリネーム済み。</p>
+
+  <h3>ユーザー確定事項</h3>
+  <table>
+    <tr><th>論点</th><th>決定</th></tr>
+    <tr><td>引数方式</td><td><code>--frag_method</code> / <code>--model_ver</code> を受け取り、<code>BASEPATH</code> からパスを組み立てる</td></tr>
+    <tr><td>シャーディング</td><td><strong>不要</strong>。<code>gen_mols/gen_safe.py</code> からも <code>--machine_id</code> / <code>--total_machines</code> を削除</td></tr>
+    <tr><td>生成時間の記録</td><td><code>gen_safe.py</code> 側の <code>run_and_record_time</code> のみ（func 側には何も追加しない）</td></tr>
+    <tr><td><code>src/gen_safe_denovo.py</code></td><td><strong>削除する</strong></td></tr>
+  </table>
+
+  <h3>現状の食い違い（解消対象）</h3>
+  <table>
+    <tr><th>項目</th><th>現状</th></tr>
+    <tr><td>引数</td><td><code>gen_safe.py</code> は <code>--model_path</code> / <code>--dataset_dir</code> / <code>--output_dir</code> / <code>--machine_id</code> / <code>--total_machines</code> を渡すが、<code>gen_safe_denovo.py</code> は受け取らない</td></tr>
+    <tr><td><code>--batch_size</code></td><td><code>gen_safe.py</code> が渡さない。既定8では OOM（実測40行が失敗）。2 で OOM ゼロ</td></tr>
+    <tr><td>行数制限</td><td><code>test_df.head(1000)</code>（L104）がハードコードされている。本番では全行必要</td></tr>
+    <tr><td><code>--n_generate</code></td><td>引数は定義されているが未使用（デッドコード）</td></tr>
+    <tr><td>出力名</td><td>スクリプトは <code>predictions.csv</code> を書くが、<code>run_and_record_time</code> は <code>predictions_{machine_id}.csv</code> を数える設定</td></tr>
+    <tr><td>引数名</td><td><code>gen_safe.py</code> は <code>--model_ver</code>、<code>gen_safe_denovo.py</code> は <code>--model_version</code></td></tr>
+  </table>
+
+  <h3>既知の設計上の割り切り</h3>
+  <div class="warn">
+    <p><code>--frag_method</code> / <code>--model_ver</code> 方式を採るため、<strong>パスの組み立てロジックが2箇所に重複</strong>します。</p>
+    <ul>
+      <li><code>generation_safe_func.py</code>: <code>model_path</code> / <code>dataset_dir</code> / <code>output_dir</code> を組み立てて実行に使う</li>
+      <li><code>gen_mols/gen_safe.py</code>: <code>output_dir</code> を組み立てて <code>run_and_record_time</code> に渡す（時間記録の保存先として必要）</li>
+    </ul>
+    <p><code>--model_path</code> 等を明示的に渡す方式ならこの重複は避けられますが、ユーザー判断により本方式を採ります。両者の規則が食い違うと時間記録が別ディレクトリに出るため、<strong>同じ規則であることを保つ必要があります</strong>。</p>
+  </div>
+</section>
+
+<section id="plan">
+  <h2>実装計画</h2>
+  <ol>
+    <article class="step" data-step="1">
+      <li>
+        <h3>Step 1: <code>src/func/generation_safe_func.py</code> を新規作成する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/func/generation_safe_func.py</code>（新規）</p>
+        <p><strong>変更内容:</strong> 現行 <code>src/gen_safe_denovo.py</code> の内容をベースに、以下を変更して作成する。</p>
+        <ol>
+          <li><strong>モジュール docstring を追加</strong>（<code>generation_rffmg_func.py:1-11</code> と同じ粒度）。<code>SAFEDesign</code> の高レベル生成APIを使わないこと、プロンプトは <code>pass_fragments</code> を <code>SAFEConverter(slicer=None)</code> でエンコードしたもの、出力は <code>predictions.csv</code>（<code>target</code> / <code>prompt_safe</code> / <code>fragment</code> / <code>prediction_1..N</code>）であることを明記。</li>
+          <li><strong>引数名を <code>--model_version</code> → <code>--model_ver</code></strong> に変更（<code>gen_safe.py</code> / <code>gen_fraggpt.py</code> と統一）。</li>
+          <li><strong><code>--batch_size</code> の既定値を 2 にする</strong>（実測: 8 は OOM、2 は OOM ゼロ）。</li>
+          <li><strong><code>test_df.head(1000)</code>（L104）を削除</strong>し、<code>--n_generate</code> を実装する。
+<pre><code>test_df = datasets.load_from_disk(dataset_dir)["test"].to_pandas()
+if args.n_generate is not None:
+    test_df = test_df.head(args.n_generate)</code></pre>
+          既定 <code>None</code> で全行。小規模確認用に残す。</li>
+          <li><strong><code>--random_seed</code> を削除</strong>。<code>do_sample=False</code> のビームサーチは決定的で、現在 <code>set_seed</code> も呼んでいないため完全に効かない引数になっている。provenance は <code>gen_safe.py</code> の <code>params</code> に残す。</li>
+          <li>関数（<code>decode_safe_smiles</code> / <code>encode_prefixes</code>）と生成ロジックは<strong>現状のまま移植</strong>する。</li>
+          <li>出力は <code>predictions.csv</code> / <code>error_logs.csv</code>（シャード接尾辞なし）。</li>
+        </ol>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="2">
+      <li>
+        <h3>Step 2: <code>src/gen_mols/gen_safe.py</code> を新しい引数に合わせる</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_mols/gen_safe.py</code></p>
+        <ol>
+          <li><code>--machine_id</code> / <code>--total_machines</code> の <code>add_argument</code> を<strong>削除</strong>。</li>
+          <li><code>--batch_size</code>（既定 2）を<strong>追加</strong>（<code>gen_fraggpt.py:37</code> と同じ様式）。</li>
+          <li><code>cmd</code> を新しい引数に合わせる。
+<pre><code>cmd = [
+    "python", f"{BASEPATH}/src/func/generation_safe_func.py",
+    "--frag_method", frag_method,
+    "--model_ver", model_ver,
+    "--n_samples", str(args.n_samples),
+    "--max_length", str(args.max_length),
+    "--num_beams", str(args.num_beams),
+    "--batch_size", str(args.batch_size),
+]</code></pre></li>
+          <li><code>run_and_record_time</code> の呼び出しを変更。<code>record_name="generation_time.json"</code>（既定値なので引数ごと削除可）、<code>predictions_pattern="predictions.csv"</code>、<code>params</code> から <code>machine_id</code> / <code>total_machines</code> を削除し <code>batch_size</code> を追加。</li>
+          <li><code>dataset_dir</code> はもう使わないので削除。<code>model_path</code> は <code>params</code> の provenance に、<code>output_dir</code> は <code>run_and_record_time</code> に渡すため残す。</li>
+        </ol>
+        <p><strong>依存関係:</strong> Step 1 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="3">
+      <li>
+        <h3>Step 3: <code>src/gen_mols/gen_safe.sh</code> に <code>--batch_size</code> を追加する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_mols/gen_safe.sh</code></p>
+<pre><code>python ${SCRIPT_DIR}/gen_safe.py --frag_method ${FRAG_NAME} --model_ver ${MODEL_VER} \
+    --n_samples 50 --num_beams 50 --batch_size 2 --random_seed 42</code></pre>
+        <p><strong>依存関係:</strong> Step 2 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="4">
+      <li>
+        <h3>Step 4: <code>src/gen_safe_denovo.py</code> を削除する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_safe_denovo.py</code>（削除）</p>
+        <p><code>generation_safe_func.py</code> に一本化されるため削除する。git 履歴には残る。</p>
+        <p><strong>依存関係:</strong> Step 1 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="5">
+      <li>
+        <h3>Step 5: 検証</h3>
+        <p><strong>対象ファイル:</strong> なし（検証のみ）</p>
+        <ul>
+          <li><code>python -m py_compile src/func/generation_safe_func.py src/gen_mols/gen_safe.py</code></li>
+          <li><code>gen_safe.py</code> が渡す引数と <code>generation_safe_func.py</code> の <code>add_argument</code> が過不足なく一致することを確認</li>
+          <li><code>--n_generate 20</code> 程度で実際に1回実行し、<code>predictions.csv</code> / <code>error_logs.csv</code> / <code>generation_time.json</code> の3つが期待どおり出ることを確認</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 3、Step 4 の後</p>
+      </li>
+    </article>
+  </ol>
+</section>
+
+<section id="questions">
+  <h2>確認したい点</h2>
+  <div class="ask">
+    <ul>
+      <li><strong><code>--random_seed</code> の削除</strong>: <code>do_sample=False</code> のビームサーチでは完全に無効な引数のため func からは削除する案。<code>gen_safe.py</code> 側は <code>params</code> の provenance 用に残す。ただし他ベースライン（rffmg / fraggpt）は実際に <code>set_seed</code> を呼んでいるため、「インターフェースを揃える」観点で残す選択もありうる。</li>
+      <li><strong><code>--batch_size</code> の既定値 2</strong>: RTX 4090（24GB）での実測に基づく。他マシンでは調整が必要。</li>
+      <li><strong><code>--n_generate</code> を <code>gen_safe.py</code> にも通すか</strong>: 現案では func のみが持つ。</li>
+    </ul>
+  </div>
+</section>
+
+<section id="out-of-scope">
+  <h2>今回は触らないもの</h2>
+  <ul>
+    <li><code>src/func/generation_safe_func_old.py</code>（参照用に残す。削除しない）</li>
+    <li>他のベースラインスクリプト、評価パイプライン</li>
+    <li>コミット（指示があるまで行わない）</li>
+  </ul>
+</section>
+</body>
+</html>

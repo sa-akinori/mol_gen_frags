@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Plan: FragGPT の実行時エラー修正と無条件LM データセットの共通化 (2026-08-03)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; }
+  h1 { border-bottom: 2px solid #333; }
+  h2 { border-bottom: 1px solid #ccc; margin-top: 2em; }
+  .step { margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+  table { border-collapse: collapse; margin: 1em 0; width: 100%; }
+  th, td { border: 1px solid #ddd; padding: 0.4em 0.7em; text-align: left; font-size: 0.95em; }
+  th { background: #f4f4f4; }
+  .warn { background: #fff3f3; border-left: 4px solid #d9534f; padding: 0.8em 1em; margin: 1em 0; }
+  .note { background: #eef6ff; border-left: 4px solid #4a90d9; padding: 0.8em 1em; margin: 1em 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plan: FragGPT の実行時エラー修正と無条件LM データセットの共通化</h1>
+  <p class="meta">Date: 2026-08-03 | Status: pending-approval</p>
+</header>
+
+<section id="overview">
+  <h2>概要</h2>
+  <p>FragGPT の学習・生成が<strong>どちらも起動しない</strong>状態にあり、あわせて
+  <code>train_fraggpt.py</code> / <code>train_promptsmiles.py</code> が HF 標準部品で置き換え可能な
+  自作クラスを重複して持っている。両方をまとめて解消する。</p>
+
+  <div class="warn">
+    <h3>現在壊れている箇所（実行すれば即座に落ちる）</h3>
+    <table>
+      <tr><th>#</th><th>箇所</th><th>症状</th></tr>
+      <tr><td>1</td><td><code>fragment_for_fraggpt.py:163,167</code></td>
+        <td><code>augment_fusmiles</code> が <strong><code>KeyError: '1'</code></strong>。
+        <code>findall</code> 側の <code>r'\[\d+\*\]'</code> に捕捉群が無く辞書キーが <code>'[1*]'</code> になる一方、
+        置換側は <code>m.group(1)</code>（<code>'1'</code>）で引くため不一致。学習開始時に落ちる</td></tr>
+      <tr><td>2</td><td><code>generation_fraggpt_func.py:14,17</code></td>
+        <td>存在しない <code>FRAGMENT_SEPARATOR</code> と <code>split_fragments</code> を import しており
+        <strong><code>ImportError</code></strong>。生成が起動しない</td></tr>
+    </table>
+  </div>
+
+  <h3>自作クラスの重複（HF 標準部品で置換可能）</h3>
+  <p>実測で等価性を確認済み。<code>DataCollatorForLanguageModeling(tokenizer, mlm=False)</code> は
+  自作 collator と <code>input_ids</code> / <code>attention_mask</code> / <code>labels</code> の3つとも
+  <strong>完全一致</strong>した（<code>pad_token</code> が <code>&lt;pad&gt;</code> で
+  <code>eos</code>(<code>&lt;/s&gt;</code>) と別トークンのため、実 eos の label が誤って <code>-100</code> にならない）。</p>
+  <table>
+    <tr><th>クラス</th><th>定義場所</th><th>置換先</th></tr>
+    <tr><td><code>FragGPTDataset</code></td><td><code>train_fraggpt.py</code></td><td>HF <code>Dataset.map()</code></td></tr>
+    <tr><td><code>DataCollatorForCausalLM</code></td><td><code>train_fraggpt.py</code></td><td><code>DataCollatorForLanguageModeling(mlm=False)</code></td></tr>
+    <tr><td><code>PromptSMILESDataset</code></td><td><code>train_promptsmiles.py</code></td><td>HF <code>Dataset.map()</code></td></tr>
+    <tr><td><code>DataCollatorForCausalLM</code></td><td><code>train_promptsmiles.py</code></td><td>同上</td></tr>
+  </table>
+  <p><code>train_gpt.py</code>（RFFMG）の <code>RFFMGDataset</code> と同名 collator は<strong>対象外</strong>。
+  プロンプト部を <code>-100</code> でマスクする条件付き学習であり、
+  <code>DataCollatorForLanguageModeling</code> では代替できない。</p>
+
+  <h3>副次的な利点</h3>
+  <ul>
+    <li><code>.map(num_proc=N)</code> でトークン化を並列化できる（現在は rc_cms 665万行を単一プロセスの Python ループで処理）</li>
+    <li>結果がディスクにキャッシュされ、2回目以降の実行ではトークン化をスキップできる</li>
+    <li><code>max_length</code> 超過の除外が <code>.filter()</code> 一行で書け、除外件数も <code>len()</code> の差で取れる</li>
+  </ul>
+
+  <h3>max_length について（調査結果）</h3>
+  <p><code>entropy/gpt2_zinc_87m</code> は <strong><code>n_positions = 256</code></strong> のため、
+  <code>max_length</code> を 256 より大きくできない（位置埋め込みを拡張するか別モデルにするしかなく、
+  いずれも RFFMG-GPT と同一モデルという比較の前提を壊す）。
+  したがって<strong>超過行は除外する</strong>方針とする（ユーザー判断）。</p>
+  <p>参考: 同一分子・同一 tokenizer での長さ実測（train 先頭20,000行）</p>
+  <table>
+    <tr><th>表現</th><th>brics 平均 / 最大</th><th>rc_cms 平均 / 最大</th></tr>
+    <tr><td>PromptSMILES（分子SMILES）</td><td>34.2 / 105</td><td>35.4 / 110</td></tr>
+    <tr><td>SAFE（<code>full_safe</code>）</td><td>46.4 / 139</td><td>45.0 / 152</td></tr>
+    <tr><td>FragGPT（<code>full_fragments</code>）</td><td>71.8 / 210</td><td>66.8 / 205</td></tr>
+  </table>
+  <p>FU-SMILES は切断結合1本を <code>[i*]</code> × 2箇所（各4トークン）で表すため、閉環数字で表す SAFE の
+  約1.5倍、分子SMILES の約2.1倍になる。この標本では 256 超過は 0 件だが、全体では裾に存在しうる。</p>
+</section>
+
+<section id="plan">
+  <h2>実装計画</h2>
+  <ol>
+    <article class="step" data-step="1">
+      <li>
+        <h3>Step 1: <code>augment_fusmiles</code> の KeyError を修正する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/func/fragment_for_fraggpt.py</code></p>
+        <p><strong>変更内容:</strong> 検証済みの実装に戻す。</p>
+        <ul>
+          <li>モジュールレベルに <code>ATTACHMENT_LABEL = re.compile(r"\[(\d+)\*\]")</code> を定義する
+            （<code>\]</code> まで含める。含めないと <code>[10*]</code> を <code>[1*]</code> と誤マッチする）。
+            内包表記の中で <code>re.compile</code> を毎回呼ばない。</li>
+          <li>ラベルは<strong>数値として</strong>扱い、<code>1..n</code> に振り直す
+            （現在の <code>sorted()</code> は文字列辞書順で <code>'[1*]' &lt; '[10*]'</code>、かつ
+            <code>labels.copy()</code> は既存ラベルの置換にとどまり、論文の「<code>1~n</code> の値に振り直す」と異なる）。</li>
+          <li>置換は <code>ATTACHMENT_LABEL.sub</code> にコールバックを渡す<strong>1パスの同時置換</strong>にする
+            （逐次 <code>str.replace</code> だと <code>1→2</code> の後に <code>2→1</code> を適用して壊れる）。</li>
+          <li>フラグメント順のシャッフルは現行のまま維持する。</li>
+          <li>シグネチャは現行の <code>(fusmiles: str, rng) -&gt; str</code> を維持する（呼び出し側を変えないため）。</li>
+          <li>docstring の <code>Args:</code> が <code>fragments</code> のままなので <code>fusmiles</code> に直す。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="2">
+      <li>
+        <h3>Step 2: <code>FRAGMENT_SEPARATOR</code> と <code>split_fragments</code> を復活させる</h3>
+        <p><strong>対象ファイル:</strong> <code>src/func/fragment_for_fraggpt.py</code></p>
+        <p><strong>変更内容:</strong> <code>generation_fraggpt_func.py</code> が import している2つを定義する。</p>
+        <ul>
+          <li><code>FRAGMENT_SEPARATOR = "."</code>（モジュールレベル定数。<code>DUMMY_ATOMIC_NUM</code> などの並びに置く）</li>
+          <li><code>split_fragments(fusmiles: str) -&gt; list[str]</code>:
+            <code>FRAGMENT_SEPARATOR</code> で分割し、<strong>空要素を除く</strong>。
+            空要素の除去はモデル出力（末尾 <code>.</code> や <code>..</code> を含みうる任意の文字列）を扱う生成側で必須。</li>
+          <li><code>augment_fusmiles</code> 内の <code>fusmiles.split(".")</code> もこの2つを使う形に統一する。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし（Step 1 と同一ファイルなので同時に実施してよい）</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="3">
+      <li>
+        <h3>Step 3: 未使用の <code>assemble_fragments</code> を削除する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/func/fragment_for_fraggpt.py</code></p>
+        <p><strong>変更内容:</strong> <code>assemble_fragments</code>（102-115行）を削除する。
+        コードからの呼び出しは無く、<code>assemble_fragments_with_reason</code> の戻り値の1要素目を
+        返すだけの薄いラッパである。生成側は <code>assemble_fragments_with_reason</code> を使っている。
+        削除後に残存参照がないことを grep で確認すること。</p>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="4">
+      <li>
+        <h3>Step 4: <code>train_fraggpt.py</code> を HF 標準部品に置き換える</h3>
+        <p><strong>対象ファイル:</strong> <code>src/train_model/train_fraggpt.py</code></p>
+        <p><strong>変更内容:</strong></p>
+        <ul>
+          <li><code>FragGPTDataset</code> と <code>DataCollatorForCausalLM</code> を削除する。</li>
+          <li>データ構築を HF <code>Dataset</code> のまま行う:
+            <ol>
+              <li><code>datasets.load_from_disk(...)</code> の train / validation split に対し <code>.map()</code> で
+                <code>augment_fusmiles</code> の適用とトークン化を行い、<code>input_ids</code> 列
+                （<code>&lt;bos&gt; … &lt;eos&gt;</code>）を作る。元の列は <code>remove_columns</code> で落とす。</li>
+              <li><code>.filter()</code> で <code>len(input_ids) &lt;= max_length</code> の行だけを残す。</li>
+              <li><strong>除外件数（filter 前後の行数の差）を train / validation それぞれ標準出力に記録する。</strong>
+                黙って捨てないこと。</li>
+            </ol>
+          </li>
+          <li>collator は <code>DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)</code> を使う。</li>
+          <li><code>--num_proc</code> 引数を追加し（default は <code>os.cpu_count() - 1</code> 相当の控えめな値）、
+            <code>.map()</code> に渡す。並列化時も <code>rng</code> による augmentation が再現可能であること
+            （<code>--seed</code> から決まること）を担保する方法をコード内に明記すること。
+            プロセス間で <code>random.Random</code> インスタンスを共有できないため、
+            <strong>行インデックスからシードを導出する</strong>（例: <code>random.Random(seed + idx)</code>）方式にする。
+            <code>with_indices=True</code> を使えば <code>.map()</code> から行インデックスを受け取れる。</li>
+          <li>未使用になる import（<code>from rdkit import Chem</code>、<code>torch</code>、<code>Dataset</code>、
+            <code>PreTrainedTokenizerBase</code> 等）を整理する。</li>
+          <li><strong>学習ハイパラ（LR / epoch / batch / warmup / eval・save / EarlyStopping / seed）は変更しない。</strong></li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 1、Step 2 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="5">
+      <li>
+        <h3>Step 5: <code>train_promptsmiles.py</code> に同じ置き換えを適用する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/train_model/train_promptsmiles.py</code></p>
+        <p><strong>変更内容:</strong> Step 4 と同一の方針で <code>PromptSMILESDataset</code> と
+        <code>DataCollatorForCausalLM</code> を削除し、<code>.map()</code> / <code>.filter()</code> /
+        <code>DataCollatorForLanguageModeling</code> に置き換える。</p>
+        <ul>
+          <li>PromptSMILES は <code>smiles</code> 列を読み、<code>--randomize_smiles</code> が有効なときのみ
+            ランダム根原子での書き直しを行う点が FragGPT と異なる。この分岐は維持する。</li>
+          <li>除外件数のログ、<code>--num_proc</code>、シードの導出方法は Step 4 と揃える。</li>
+          <li><strong>学習ハイパラは変更しない。</strong></li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 4 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="6">
+      <li>
+        <h3>Step 6: 検証（メインエージェントが実施）</h3>
+        <p><strong>対象ファイル:</strong> 実行のみ（コード変更なし）</p>
+        <ul>
+          <li>全変更ファイルの構文チェックと import 確認（<code>generation_fraggpt_func</code> が import できること）</li>
+          <li><code>augment_fusmiles</code> が例外なく動き、<strong>変更前の Mol 版と化学的に同一</strong>であることを実データで確認</li>
+          <li><code>split_fragments</code> が空要素を除去すること（<code>"a..b."</code> → <code>["a","b"]</code>）</li>
+          <li>小さい HF DatasetDict で <code>train_fraggpt.py</code> / <code>train_promptsmiles.py</code> が数ステップ回ること</li>
+          <li><code>.filter()</code> による除外件数がログに出ること</li>
+          <li><strong>同一 <code>--seed</code> で2回実行し、学習データが完全に一致すること</strong>（並列化しても再現するか）</li>
+          <li><code>train_gpt.py</code>（RFFMG）が影響を受けていないこと</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 5 の後</p>
+      </li>
+    </article>
+  </ol>
+</section>
+
+<section id="out-of-scope">
+  <h2>スコープ外</h2>
+  <ul>
+    <li><code>train_gpt.py</code>（RFFMG）の <code>RFFMGDataset</code> と専用 collator（条件付き学習のため代替不可）</li>
+    <li><code>max_length</code> の値そのものの変更（<code>n_positions = 256</code> の制約により不可）</li>
+    <li>評価の立体比較の問題（<code>next_plan.md</code> の保留項目）</li>
+    <li><code>make_datasets.py</code></li>
+  </ul>
+</section>
+
+<section id="note">
+  <h2>注意</h2>
+  <div class="note">
+    <p><code>data/fraggpt/</code> と <code>data/promptsmiles/</code> は生成済み。
+    本計画はコードのみの変更で、データの再生成は不要。</p>
+  </div>
+</section>
+</body>
+</html>

@@ -366,6 +366,157 @@ RFFMG のフラグメント集合をそのまま入力する用途には**どち
     `evaluation_func` 側が列位置に依存していないか確認すること。依存していれば `sampler` 列は別ファイルに出す。
 - **Dependencies**: after Step 13
 
+### Step 15: 学習・検証データも SAFE のデータセットから読む（単一データソース化）
+
+- **Target file**: `src/train_model/train_promptsmiles.py`, `src/evaluation.py`
+  （`src/make_datasets.py` の promptsmiles ブロック削除は**ユーザーが自分で行う**）
+- **背景**: 生成（test）は既に SAFE のデータセットを読んでいるのに、学習・検証だけ
+  `data/promptsmiles/{frag}/normal/{train,val}.smi` という別ファイルを読んでいた。
+  データソースを1つに統一すれば取り違えが起きず、`data/promptsmiles/` 自体が不要になる。
+- **実測（brics）**: SAFE のデータセットは train / validation とも **1分子1行**なので重複除去は不要。
+
+  | split | 行数 | 固有分子 | 分割の分子数との差 |
+  |---|---|---|---|
+  | train | 1,714,298 | 1,714,298 | −3,610（0.21%） |
+  | validation | 45,203 | 45,203 | −5（0.01%） |
+  | test | 82,441 | 20,000 | 一致 |
+
+  差は `make_datasets.py` の `drop_duplicates(subset='full_safe')` に由来する。
+  結果として PromptSMILES の学習分子は **SAFE と厳密に一致**し、RFFMG より 0.21% 少なくなる。
+  3手法すべてと完全一致させることは（SAFE 自体が RFFMG より少ないため）不可能で、この差は許容する。
+- **使用する split と列**:
+
+  | 用途 | split | 列 |
+  |---|---|---|
+  | 学習 | `train` | `smiles` |
+  | 検証 | `validation` | `smiles` |
+  | 生成 | `test` | `pass_fragments`（正解は `smiles`） |
+
+- **Changes**:
+  - `train_promptsmiles.py`: `.smi` の読み込みをやめ、
+    `datasets.load_from_disk(f'{BASEPATH}/data/safe/{frag_method}/normal')` の
+    `train` / `validation` split の `smiles` 列を使う。`read_lines` が不要になれば削除する。
+  - `evaluation.py`: promptsmiles の `tr_file_name` を `f'{BASEPATH}/data/safe/{frag_method}/normal'` に変更する。
+    - `loadTrainSmiles` には既に `safe_gpt` 経路（`load_from_disk` → `smiles` 列）があるため、
+      **`src/func/evaluation_func.py` は変更しない**。
+    - `arc_name` は `loadTrainSmiles` と `loadGenSmiles` の両方で使われており、promptsmiles は
+      生成結果の読み取りには `t5chem` 経路が必要。よって**学習データ読み込み用の変数を分ける**
+      （例: `train_arc_name`）。promptsmiles と safe_gpt は `'safe_gpt'`、それ以外は `'t5chem'`。
+    - **既存モデル（t5chem / gpt / safe_gpt / fraggpt）の挙動・パスは一切変更しないこと。**
+      `evaluation.py` は RFFMG でも実行されるため、影響が出ないことを最優先する。
+- **Dependencies**: after Step 14
+
+### Step 16: PromptSMILES 専用データセットへの切り替え（ユーザーが make_datasets.py に追加）
+
+- **Target file**: `src/train_model/train_promptsmiles.py`, `src/gen_mols/gen_promptsmiles.py`, `src/evaluation.py`
+- **背景**: Step 15 では SAFE のデータセット（`data/safe/{frag}/normal`）を直接読んでいたが、
+  「異なる手法のデータを読み込むとコードとして分かりにくい」というユーザー判断により、
+  **ユーザーが `make_datasets.py` に PromptSMILES 専用データセットの出力を追加した**（139-149行付近）。
+  コード側をこの新しいデータソースに合わせる。
+- **新しいデータセット**: `data/promptsmiles/{frag_method}/normal`（HF `DatasetDict`）
+  - splits: `train` / `validation` / `test`
+  - 列: **`smiles`** と **`pass_fragments`** の2列のみ
+  - 由来: `safe_tr` / `safe_val` / `safe_te` から該当2列を抜き出したもの。よって分子・行数は SAFE と一致する
+    （train 1,714,298行=1分子1行 / validation 45,203行=1分子1行 / test 82,441行=20,000分子）
+- **Changes**:
+  - `train_promptsmiles.py`: 読み込み先を `data/safe/{frag}/normal` から
+    **`data/promptsmiles/{frag}/normal`** に変更。`train` / `validation` split の `smiles` 列を使う。
+  - `gen_promptsmiles.py`: 読み込み先を `data/safe/{frag}/normal` から
+    **`data/promptsmiles/{frag}/normal`** に変更。`test` split の `pass_fragments`（入力）と `smiles`（正解）を使う。
+  - `evaluation.py`: promptsmiles の `tr_file_name` を **`data/promptsmiles/{frag}/normal`** に変更。
+    `train_arc_name` の仕組み（`safe_gpt` 経路で `load_from_disk` → `smiles` 列）はそのまま使える。
+    **既存4モデルの挙動は一切変更しないこと。**
+  - 生成時に書き出す `test.source` / `test.target` は同ディレクトリのままでよい
+    （`save_to_disk` が既存ファイルを削除しないことを実測で確認済み）。
+- **Dependencies**: after Step 15
+
+### Step 17: 事前学習モデルの定数化（`--pretrain` の廃止）
+
+- **Target file**: `src/train_model/train_promptsmiles.py`, `src/train_model/train_gpt.py`
+  （`train_fraggpt.py` は別セッションが並行編集中のため対象外）
+- **背景（ユーザー判断）**: 比較対象のベースラインはいずれも **ZINC で事前学習された GPT2
+  （`entropy/gpt2_zinc_87m`）のみ**を使う。実測で確認した事実:
+  - `run_promptsmiles.sh` / `run_rffmg.sh` とも `--pretrain` を渡しておらず、常に既定値が使われる
+  - RFFMG の T5Chem は `run_rffmg.sh` のシェル分岐で外部CLI（`t5chem train`）が呼ばれるため、
+    `train_gpt.py` は GPT2 専用。`train_*.py` の `--pretrain` はどれも実質使われていない
+  - `entropy/gpt2_zinc_87m` は `pad=<pad>(id=1)` / `bos=<s>` / `eos=</s>` をすべて持つ
+- **Changes**:
+  - `--pretrain` 引数を廃止し、モジュール定数 `PRETRAINED_MODEL = "entropy/gpt2_zinc_87m"` に置き換える。
+    `AutoTokenizer.from_pretrained` / `GPT2LMHeadModel.from_pretrained` / `GPT2Config.from_pretrained`
+    の参照を差し替える。
+  - 定数化により `if tokenizer.pad_token_id is None:` と
+    `if tokenizer.bos_token_id is None or ...: raise ValueError` は**到達不能なデッドコード**になるため削除する
+    （`train_promptsmiles.py` では既にユーザーが削除済み。`train_gpt.py` を揃える）。
+  - `run_rffmg.sh` / `run_promptsmiles.sh` は `--pretrain` を渡していないので**変更不要**。
+- **Dependencies**: after Step 16
+
+### Step 18: SMILES ランダム化の採否（**最終決定: 行う**）
+
+- **経緯**: いったん「行わない」と決定したが（理由: RFFMG・SAFE がランダム化 augmentation を
+  行っておらず、PromptSMILES だけ行うと3手法の条件が揃わないため）、
+  下記の実測により **2026-08-03 に「行う」へ変更**した。実装は Step 19。
+- **判断を変えた根拠（実測）**: カノニカルSMILESのみで学習すると、
+  **学習データの開始原子が系統的に偏る**ことが分かった。
+  データセットの SMILES は既にカノニカル形式で保存されているため、
+  パース後に再カノニカル化すると **6分子すべてで開始原子 index が 0**（カノニカル順の先頭）になった。
+
+  | 原子数 | カノニカル出力の開始原子 index |
+  |---|---|
+  | 42 / 33 / 14 / 33 / 34 / 33 | いずれも **0** |
+
+  一方 PromptSMILES の推論プロンプトは、結合点が末尾に来るよう再ルート化されるため
+  **任意の位置から始まる**（例: `n1c(N)c(cccc2)c2nc1`）。
+  つまり学習と推論で表現が食い違う。**これは PromptSMILES 固有の問題**であり、
+  RFFMG・SAFE は推論時も学習時と同じ表現形式を使うため生じない。
+  よって「他手法と条件を揃える」ことを理由にランダム化を外す論拠は成り立たない。
+- **論文の記述（Appendix A）もこれを支持する**:
+
+  > "We endeavoured to follow model architectures and parameters to compared models in each
+  > experiment where possible, **with the exception that we always trained the respective RNN
+  > with SMILES augmentation by 10-fold restricted randomization**. This was done due to the
+  > fact that **PromptSMILES rearranges SMILES strings forming non-canonical representations**."
+
+  著者も「他の条件は比較対象に揃えたが、ランダム化だけは例外として必ず入れた」としている。
+- **論文との差異（報告時に明記すべき点）**:
+  PromptSMILES 論文 Appendix A は、この点を**意図的な例外**として次のように述べている。
+
+  > "We endeavoured to follow model architectures and parameters to compared models in each
+  > experiment where possible, **with the exception that we always trained the respective RNN
+  > with SMILES augmentation by 10-fold restricted randomization**. This was done due to the
+  > fact that **PromptSMILES rearranges SMILES strings forming non-canonical representations**."
+
+  つまり著者は「他の条件は比較対象に揃えたが、ランダム化だけは例外として必ず入れた」としている。
+  本プロジェクトはプロジェクト内の公平性を優先し、**この要素を意図的に採用しない**。
+  - 倍率10の根拠は論文に示されておらず、2倍・5倍との比較実験（アブレーション）も**行われていない**。
+    `restricted randomization` の手法自体は Arús-Pous et al. (2019) を引用。
+  - 想定される影響: プロンプトは再ルート化された非カノニカル文字列
+    （例: `n1c(N)c(cccc2)c2nc1`）なので、カノニカルのみで学習した prior は不利になりうる。
+    結果が想定より低い場合、この点を要因候補として検討する。
+- **毎エポックのランダム化は採用しない**: 本プロジェクトは `eval_loss` で EarlyStopping と
+  best model 選択を行うため、val の表記が毎回変わると評価が不安定になる。
+  なお論文の10倍augmentationも事前生成の固定データセットであり、毎エポック引き直しではない。
+- **Dependencies**: after Step 17
+
+### Step 19: SMILES ランダム化の実装（データ量は1倍のまま）
+
+- **Target file**: `src/train_model/train_promptsmiles.py`, `src/train_model/run_promptsmiles.sh`
+- **決定内容**:
+  - **1分子1系列のまま、表記だけランダム化する**（データ量は増やさない = RFFMG・SAFE と同条件）。
+    論文は10倍だが、倍率10の根拠は論文に示されておらず、2倍・5倍とのアブレーションも行われていない。
+    根拠があるのは「ランダム化すること」であって「10倍であること」ではない。
+  - **データセット構築時に1回だけ変換し、以降は固定**（毎エポックの引き直しはしない）。
+    本プロジェクトは `eval_loss` で EarlyStopping と best model 選択を行うため、
+    表記が毎回変わると評価が不安定になる。論文の10倍augmentationも事前生成の固定データセットであり、
+    毎エポック引き直しではない。
+  - train / validation の**両方**をランダム化する（同一分布にして `eval_loss` を意味のある指標に保つ）。
+  - `random.Random(seed)` で再現性を担保する。
+  - **オプションではなく常時実行**とする（使われない引数を残さない方針に合わせる）。
+    アブレーションが必要になった時点でフラグ化すればよい。
+- **Changes**: `validate_smiles` にランダム化を戻す
+  （`rootedAtAtom=rng.randrange(mol.GetNumAtoms())`, `canonical=False`）。
+  `import random` と `rng` を復活させ、`run_promptsmiles.sh` のコメントも実態に合わせる。
+- **Dependencies**: after Step 18
+
 ## 未確定事項
 
 なし（Step 2 の結果により解消済み）。

@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Plan: プロンプトを pass_safe から encoder(pass_fragments) に変更 (2026-08-01)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; }
+  h1 { border-bottom: 2px solid #333; }
+  .step { margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+  pre { background: #f4f4f4; padding: 0.8em; border-radius: 4px; overflow-x: auto; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; margin: 1em 0; width: 100%; }
+  th, td { border: 1px solid #ddd; padding: 0.4em 0.8em; text-align: left; vertical-align: top; }
+  th { background: #f4f4f4; }
+  .ask { background: #fffbe6; border-left: 4px solid #e6c200; padding: 0.8em 1em; }
+  .warn { background: #fff0f0; border-left: 4px solid #d33; padding: 0.8em 1em; }
+  .drop { background: #f2f2f2; border-left: 4px solid #999; padding: 0.8em 1em; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plan: gen_safe_denovo.py のプロンプトを pass_safe から encoder(pass_fragments) に変更</h1>
+  <p class="meta">Date: 2026-08-01 | Status: pending-approval (rev.2 — 不要な Step を削除)</p>
+</header>
+
+<section id="overview">
+  <h2>概要</h2>
+  <p><code>src/gen_safe_denovo.py</code> のプロンプトを、test split の <code>pass_safe</code> 列から <strong><code>pass_fragments</code> を <code>safe.SAFEConverter</code> でエンコードしたもの</strong>に変更する。</p>
+
+  <h3>変更理由</h3>
+  <p><code>pass_safe</code> は元分子の断片対応関係を保持しており、タスクの答えを部分的に与えてしまっている。</p>
+  <p><code>convert2safe</code>（<code>src/func/fragment_for_safe.py:54-65</code>）は同位体ラベル付きダミー原子 <code>[N*]</code> を拾って番号を振るため、<strong>同じ <code>[1*]</code> を持つ2つの断片には同じ閉環数字が入る</strong>。一方 <code>pass_fragments</code> は <code>convert_dummy_atoms_rdkit</code>（<code>src/gen_frags/safe_frags.py:18-33</code>）で同位体を除去済みの匿名 <code>*</code> なので、その情報を持たない。</p>
+<pre><code>pass_fragments: *C1Sc2ccccc2C(=O)C1=C.*c1ccccc1        ← * は2つ、どちらも匿名
+
+pass_safe     : C13Sc2ccccc2C(=O)C1=C.c13ccccc1   未閉鎖[]     ← 両方「3」= 繋がる相手が確定
+encoder出力   : C14Sc2ccccc2C(=O)C1=C.c13ccccc1   未閉鎖[3,4]  ← どちらも開放端</code></pre>
+
+  <h3>他ベースラインとの公平性</h3>
+  <div class="warn">
+  <table>
+    <tr><th>手法</th><th>入力</th><th>対応関係の情報</th><th>参照</th></tr>
+    <tr><td>FragGPT</td><td><code>pass_fragments</code></td><td>なし</td><td><code>generation_fraggpt_func.py:97</code></td></tr>
+    <tr><td>PromptSMILES</td><td><code>pass_fragments</code></td><td>なし</td><td><code>gen_promptsmiles.py:122</code></td></tr>
+    <tr><td>RFFMG</td><td><code>test.source</code>（同位体除去形）</td><td>なし</td><td><code>make_datasets.py:87-90</code></td></tr>
+    <tr><td><strong>SAFE（現状）</strong></td><td><strong><code>pass_safe</code></strong></td><td><strong>あり</strong></td><td>—</td></tr>
+  </table>
+  <p>タスクが「指定した断片から分子を生成する」である以上、断片の接続先はモデルが決めるべきで、<code>pass_fragments</code> を入力とするのが正しい。</p>
+  </div>
+
+  <h3>実測（brics / finetuning、40行 × 8本 = 320系列）</h3>
+  <table>
+    <tr><th>プロンプト</th><th>全閉鎖</th><th>単一分子</th><th>validity</th></tr>
+    <tr><td><code>pass_safe</code>（現状）</td><td>32.8%</td><td>32.8%</td><td>95.6%</td></tr>
+    <tr><td><strong><code>encoder(pass_fragments)</code></strong></td><td><strong>16.2%</strong></td><td><strong>15.0%</strong></td><td><strong>93.4%</strong></td></tr>
+  </table>
+  <p>16.2% は性能低下ではなく、公平な条件での実力値。</p>
+
+  <h3>エンコード方法の確定事項（実測済み）</h3>
+  <ul>
+    <li><code>SAFEConverter</code> は既定で <code>slicer="brics"</code>（<code>converter.py:61</code>）。公開APIは全て <code>do_not_fragment_further=True</code> を既定とし、<code>sf.utils.attr_as(encoder, "slicer", None)</code> で一時的に無効化している（<code>sample.py:911</code>）。</li>
+    <li><strong><code>SAFEConverter(slicer=None)</code> で直接構築した場合と <code>attr_as</code> 版は 100/100 で一致</strong>（実測）。</li>
+    <li><code>randomize=False</code> とする。<code>_completion</code> は <code>randomize=True</code>（試行ごとの拡張）だが、本スクリプトは1回の決定的な生成なので不要。再現性のためにも固定する。</li>
+    <li><strong>encoder 失敗は 3,000 行中 0 件</strong>（実測）。専用の例外処理は設けず、既存のバッチ単位 <code>try/except</code> に任せる。</li>
+  </ul>
+
+  <h3>検討して見送ったもの</h3>
+  <div class="drop">
+  <ul>
+    <li><strong>RDKit ログの抑止</strong>: encoder の stderr は 200行あたり17行（<code>unclosed ring</code> 8件）で、82,441行でも約7,000行。実行時間から見て誤差。<code>RDLogger.DisableLog('rdApp.*')</code> は全ログを止めるため、本当に見たい警告まで消える。<strong>入れない</strong>。</li>
+    <li><strong>ループ前の一括エンコードと失敗行の分離処理</strong>: encoder 失敗が実測0件のため、専用処理を書く価値がない。<strong>入れない</strong>。</li>
+    <li><strong>ラッパー関数 <code>encode_fragments()</code></strong>: <code>ENCODER.encoder(...)</code> を1行呼ぶだけの関数に意味がない。<strong>作らない</strong>。</li>
+  </ul>
+  </div>
+</section>
+
+<section id="plan">
+  <h2>実装計画</h2>
+  <p>対象ファイルは <strong><code>src/gen_safe_denovo.py</code> のみ</strong>。他ファイルは変更しない。</p>
+  <ol>
+    <article class="step" data-step="1">
+      <li>
+        <h3>Step 1: エンコーダをモジュールレベル定数として追加する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_safe_denovo.py</code>（import 直後）</p>
+<pre><code>ENCODER = safe.SAFEConverter(slicer=None)</code></pre>
+        <p><code>slicer=None</code> は <code>SAFEDesign</code> の <code>do_not_fragment_further=True</code> に相当する。ラッパー関数は作らず、呼び出し側でそのまま使う。</p>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="2">
+      <li>
+        <h3>Step 2: バッチループのプロンプトを差し替える</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_safe_denovo.py</code>（バッチループ内）</p>
+        <p><code>prefixes = batch_df['pass_safe'].tolist()</code> を次に置き換える。</p>
+<pre><code>prefixes = [ENCODER.encoder(f, canonical=False, randomize=False,
+                            constraints=None, allow_empty=True)
+            for f in batch_df['pass_fragments']]</code></pre>
+        <p>既存の <code>try:</code> の<strong>中</strong>に置く（encoder が例外を投げたらバッチ単位の except が拾う）。</p>
+        <p><strong>依存関係:</strong> Step 1 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="3">
+      <li>
+        <h3>Step 3: 出力カラムを実際のプロンプトに差し替える</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_safe_denovo.py</code>（バッチループと <code>base_df</code> の組み立て）</p>
+        <ul>
+          <li><code>prefixes</code> は生成結果と同様にループ外のリストへ蓄積する（<code>generated_safe</code> と同じ扱い）。</li>
+          <li><code>base_df</code> の <code>pass_safe</code> を、蓄積したプロンプト列 <code>prompt_safe</code> に差し替える。</li>
+          <li>変更後の出力カラム: <code>['target', 'prompt_safe', 'fragment']</code> + <code>safe_1..N</code> + <code>prediction_1..N</code></li>
+          <li><code>error_logs</code> の <code>pass_safe</code> 列は <code>pass_fragments</code> に変える。</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 2 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="4">
+      <li>
+        <h3>Step 4: 構文チェック</h3>
+        <p><strong>対象ファイル:</strong> なし（検証のみ）</p>
+        <ul>
+          <li><code>python -m py_compile src/gen_safe_denovo.py</code></li>
+          <li><code>grep -n "pass_safe" src/gen_safe_denovo.py</code> が空になることを確認する。</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 3 の後</p>
+      </li>
+    </article>
+  </ol>
+</section>
+
+<section id="questions">
+  <h2>確認したい点</h2>
+  <div class="ask">
+    <ul>
+      <li><strong><code>prompt_safe</code> 列を出力に残すか</strong>。デバッグ用途がなければ削って <code>['target', 'fragment']</code> + <code>safe_1..N</code> + <code>prediction_1..N</code> にもできる。</li>
+    </ul>
+  </div>
+</section>
+
+<section id="out-of-scope">
+  <h2>今回は触らないもの</h2>
+  <ul>
+    <li><code>src/func/generation_safe_func.py</code>、他のベースラインスクリプト</li>
+    <li>制約付きデコード（<code>DisjunctiveConstraint</code>）— 手法の性能をそのまま測る方針のため行わない</li>
+    <li>コミット（指示があるまで行わない）</li>
+  </ul>
+</section>
+</body>
+</html>

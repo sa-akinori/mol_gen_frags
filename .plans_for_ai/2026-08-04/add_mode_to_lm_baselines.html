@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Plan: FragGPT / PromptSMILES に from_scratch モードを追加する (2026-08-04)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; }
+  h1 { border-bottom: 2px solid #333; }
+  h2 { border-bottom: 1px solid #ccc; margin-top: 2em; }
+  .step { margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+  pre { background: #f4f4f4; padding: 0.8em; border-radius: 4px; overflow-x: auto; }
+  table { border-collapse: collapse; margin: 1em 0; width: 100%; }
+  th, td { border: 1px solid #ddd; padding: 0.4em 0.7em; text-align: left; font-size: 0.95em; }
+  th { background: #f4f4f4; }
+  .warn { background: #fff3f3; border-left: 4px solid #d9534f; padding: 0.8em 1em; margin: 1em 0; }
+  .ask { background: #fff8e1; border-left: 4px solid #f0ad4e; padding: 0.8em 1em; margin: 1em 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plan: FragGPT / PromptSMILES に from_scratch モードを追加する</h1>
+  <p class="meta">Date: 2026-08-04 | Status: pending-approval</p>
+</header>
+
+<section id="overview">
+  <h2>概要</h2>
+  <p><code>.plans_for_ai/2026-07-29/add_fraggpt_baseline.md</code> および
+  <code>.plans_for_ai/2026-07-28/add_promptsmiles_baseline.md</code> で
+  「<strong>finetuning と from_scratch の両方を学習する</strong>（既存2手法と同じ構成に揃えるため）」と
+  決めていたが、現在の <code>train_fraggpt.py</code> / <code>train_promptsmiles.py</code> には
+  <strong><code>--mode</code> 引数が存在せず、<code>from_scratch</code> が実装されていない</strong>。</p>
+
+  <div class="warn">
+    <h3>現状（実測）</h3>
+    <table>
+      <tr><th></th><th>RFFMG (<code>train_gpt.py</code>)</th><th>FragGPT</th><th>PromptSMILES</th></tr>
+      <tr><td><code>--mode</code> 引数</td><td>あり</td><td><strong>なし</strong></td><td><strong>なし</strong></td></tr>
+      <tr><td><code>from_scratch</code></td><td><code>GPT2Config</code> からランダム初期化</td>
+        <td><strong>未実装</strong>（常に <code>from_pretrained</code>）</td><td><strong>未実装</strong></td></tr>
+      <tr><td>出力先</td><td><code>models/rffmg/gpt/{mode}/...</code></td>
+        <td><strong><code>.../finetuning/...</code> 固定</strong></td><td><strong><code>.../finetuning/...</code> 固定</strong></td></tr>
+    </table>
+    <p>SAFE と RFFMG は両モードを持つため、このままではベースライン比較表に穴が空く。</p>
+
+    <h3><code>run_fraggpt.sh</code> の破損</h3>
+    <pre><code>export WANDB_DIR="wandb/fraggpt/gpt/${MODE}/${FRAG_NAME}"</code></pre>
+    <p><code>MODE</code> 変数が定義されておらず、<code>wandb/fraggpt/gpt//brics</code> と空文字が挟まる。
+    <code>FRAG_NAME</code> の行はあるが <code>MODE=</code> の行が失われている。</p>
+  </div>
+
+  <div class="ask">
+    <h3>両 .sh から失われている共通項目（要確認）</h3>
+    <p><code>run_fraggpt.sh</code> / <code>run_promptsmiles.sh</code> とも、以前は持っていた以下が現在は無い。</p>
+    <ul>
+      <li><code>export CUDA_VISIBLE_DEVICES=0</code></li>
+      <li>リポジトリルートへの <code>cd</code></li>
+      <li><code>source ~/miniconda3/etc/profile.d/conda.sh</code> + <code>conda activate env_fraggpt</code> / <code>env_promptsmiles</code></li>
+    </ul>
+    <p><code>gen_fraggpt.sh</code> は現在これらを持っており（2026-08-02 にユーザー判断で追加）、
+    <code>run_*.sh</code> だけ無い状態になっている。<strong>復元するかはユーザーに確認する。</strong></p>
+  </div>
+</section>
+
+<section id="plan">
+  <h2>実装計画</h2>
+  <ol>
+    <article class="step" data-step="1">
+      <li>
+        <h3>Step 1: <code>train_fraggpt.py</code> に <code>--mode</code> を追加する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/train_model/train_fraggpt.py</code></p>
+        <p><strong>変更内容:</strong> <code>src/train_model/train_gpt.py:107-108, 142-148, 153</code> を手本にする。</p>
+        <ul>
+          <li><code>--mode</code> を追加: <code>type=str, default="finetuning", choices=["finetuning", "from_scratch"]</code></li>
+          <li>モデル初期化を分岐させる。
+            <pre><code>if args.mode == "finetuning":
+    model = GPT2LMHeadModel.from_pretrained(pretrained_model)
+else:  # from_scratch
+    config = GPT2Config.from_pretrained(pretrained_model)
+    model = GPT2LMHeadModel(config)</code></pre>
+            <strong>tokenizer は両モードとも <code>from_pretrained</code> のまま</strong>（語彙は共通、重みだけ変える）。</li>
+          <li><code>from transformers import ...</code> に <code>GPT2Config</code> を追加する。</li>
+          <li><code>output_dir</code>（113行）を <code>models/fraggpt/gpt/{args.mode}/{args.frag_method}</code> にする。</li>
+          <li>学習ハイパラは一切変更しない。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="2">
+      <li>
+        <h3>Step 2: <code>train_promptsmiles.py</code> に <code>--mode</code> を追加する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/train_model/train_promptsmiles.py</code></p>
+        <p><strong>変更内容:</strong> Step 1 と完全に同一の変更を行う。
+        <code>output_dir</code>（120行）を <code>models/promptsmiles/gpt/{args.mode}/{args.frag_method}</code> にする。
+        学習ハイパラおよび SMILES ランダム化の挙動は一切変更しない。</p>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="3">
+      <li>
+        <h3>Step 3: <code>run_fraggpt.sh</code> を修正する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/train_model/run_fraggpt.sh</code></p>
+        <ul>
+          <li>上部に <code>MODE="finetuning"</code> を追加する（コメントで <code>"finetuning"</code> /
+            <code>"from_scratch"</code> を明示）。<code>FRAG_NAME</code> と同じ書式に揃えること。</li>
+          <li><code>train_fraggpt.py</code> の実行に <code>--mode "${MODE}"</code> を渡す。</li>
+          <li><code>WANDB_DIR</code> の <code>${MODE}</code> が解決されることを確認する（変数定義により自動的に解決される）。</li>
+          <li><strong>以下は「要確認」項目。ユーザーの承認があった場合のみ追加すること</strong>:
+            <ul>
+              <li><code>export CUDA_VISIBLE_DEVICES=0</code></li>
+              <li>リポジトリルートへの <code>cd "$(cd "$(dirname "$0")" &amp;&amp; pwd)/../.." || exit 1</code></li>
+              <li><code>source ~/miniconda3/etc/profile.d/conda.sh</code> + <code>conda activate env_fraggpt</code></li>
+            </ul>
+          </li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 1 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="4">
+      <li>
+        <h3>Step 4: <code>run_promptsmiles.sh</code> を修正する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/train_model/run_promptsmiles.sh</code></p>
+        <p><strong>変更内容:</strong> Step 3 と同一。</p>
+        <ul>
+          <li><code>MODE="finetuning"</code> を追加し <code>--mode "${MODE}"</code> を渡す。</li>
+          <li><code>WANDB_DIR</code> の <code>finetuning</code> 固定を <code>${MODE}</code> に変更する。</li>
+          <li>「要確認」項目（<code>conda activate env_promptsmiles</code> など）の扱いは Step 3 と揃える。</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 2 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="5">
+      <li>
+        <h3>Step 5: 検証（メインエージェントが実施）</h3>
+        <p><strong>対象ファイル:</strong> 実行のみ（コード変更なし）</p>
+        <ul>
+          <li>全変更ファイルの構文チェック（py / bash）</li>
+          <li><code>--mode from_scratch</code> で<strong>事前学習重みが読まれていない</strong>こと
+            （重みが <code>from_pretrained</code> と異なること）を確認</li>
+          <li><code>--mode finetuning</code> で事前学習重みと一致すること</li>
+          <li>出力先が <code>models/{手法}/gpt/{mode}/{frag_method}</code> になること（両モードで別ディレクトリ）</li>
+          <li>小さいデータで両モードが数ステップ回ること</li>
+          <li><code>train_gpt.py</code>（RFFMG）が影響を受けていないこと</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 4 の後</p>
+      </li>
+    </article>
+  </ol>
+</section>
+
+<section id="out-of-scope">
+  <h2>スコープ外</h2>
+  <ul>
+    <li><code>train_gpt.py</code>（RFFMG）と SAFE の学習スクリプト</li>
+    <li>学習ハイパラの変更</li>
+    <li><code>README.md</code> / <code>README_ja.md</code> の更新（必要なら別途）</li>
+  </ul>
+</section>
+
+<section id="note">
+  <h2>注意</h2>
+  <p><code>models/fraggpt/</code> と <code>models/promptsmiles/</code> は未作成のため、
+  出力先の変更による既存モデルへの影響は無い。</p>
+</section>
+</body>
+</html>

@@ -23,15 +23,33 @@ def loadTrainSmiles(
     arc_name:str,
     file_name:str,
     )->Set[str]:
-    
-    if arc_name == 'safe_gpt':
-        row_datasets = datasets.load_from_disk(file_name)
-        train_dataset = row_datasets['train']
-        trsmiles = train_dataset['smiles']
-        
-    elif arc_name == 't5chem':
+    """Load the molecules a model was trained on as a set of canonical SMILES.
+
+    The reader is chosen by the kind of path given, not by ``arc_name``: the training
+    molecules are stored either as a HuggingFace dataset (``smiles`` column of the ``train``
+    split) or as a one-column text file.
+
+    | model        | file_name                                 | kind      | reader                       |
+    |--------------|-------------------------------------------|-----------|------------------------------|
+    | safe_gpt     | ``data/safe/{frag}/normal``               | directory | ``load_from_disk`` -> smiles |
+    | promptsmiles | ``data/promptsmiles/{frag}/normal``       | directory | same                         |
+    | fraggpt      | ``data/fraggpt/{frag}/normal``            | directory | same                         |
+    | t5chem / gpt | ``data/rffmg/{frag}/normal/train.target`` | file      | ``pd.read_csv``              |
+
+    Args:
+        arc_name (str): Layout of the generated molecules (``safe_gpt`` or ``t5chem``). Kept
+            so that this function is called with the same value as :func:`loadGenSmiles`;
+            it does not select the reader.
+        file_name (str): HuggingFace dataset directory, or a text file with one SMILES per line.
+
+    Returns:
+        Set[str]: Canonical SMILES of the training molecules.
+    """
+    if os.path.isdir(file_name):
+        trsmiles = datasets.load_from_disk(file_name)['train']['smiles']
+    else:
         trsmiles = pd.read_csv(file_name, header=None).squeeze().tolist()
-        
+
     trsmiles = Parallel(n_jobs=-1)(delayed(Smi2CanSmi)(smi) for smi in tqdm(trsmiles, desc='trsmiles, convert canonical'))
     return set(trsmiles)
 

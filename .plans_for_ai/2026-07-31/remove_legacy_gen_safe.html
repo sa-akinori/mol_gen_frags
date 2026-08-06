@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Plan: 旧版 src/gen_safe.py の削除 (2026-07-31)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; }
+  h1 { border-bottom: 2px solid #333; }
+  .step { margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+  table { border-collapse: collapse; margin: 1em 0; }
+  th, td { border: 1px solid #ddd; padding: 0.4em 0.8em; text-align: left; }
+  th { background: #f4f4f4; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plan: 旧版 src/gen_safe.py の削除</h1>
+  <p class="meta">Date: 2026-07-31 | Status: pending-approval</p>
+</header>
+
+<section id="overview">
+  <h2>概要</h2>
+  <p><code>src/gen_safe.py</code>（ルート直下の direct 生成版）は現行の
+  <code>src/gen_mols/gen_safe.py</code> に置き換えられ、どこからも参照されなくなった旧版である。
+  以下の理由から削除する。</p>
+  <ul>
+    <li>最終更新は 2026-07-09 (<code>ef1b5ab</code>)。以降の改修（生成時間記録・マシン分散・CLI 引数化・pretrained 対応）はすべて <code>src/gen_mols/gen_safe.py</code> 側にのみ入っている。</li>
+    <li>beam ブランチ（L176-188）は <code>src/func/generation_safe_func.py</code> に存在しない <code>--slice_name</code> / <code>--gen_method</code> を渡しており、実行すると argparse エラーで落ちる（既に動作しない）。</li>
+    <li><code>.plans_for_ai/2026-07-27/gen_inference_time.md</code> L20 で明示的にスコープ外とされたまま放置されている。</li>
+  </ul>
+
+  <h3>参照調査の結果（削除の安全性）</h3>
+  <table>
+    <tr><th>対象</th><th>結果</th></tr>
+    <tr><td><code>import gen_safe</code> / <code>from gen_safe import</code></td><td>なし</td></tr>
+    <tr><td><code>generate_from_model()</code> の外部呼び出し</td><td>なし（同ファイル内のみ）</td></tr>
+    <tr><td><code>.sh</code> からの呼び出し</td><td>なし（<code>gen_mols/gen_safe.sh</code> は <code>${SCRIPT_DIR}/gen_safe.py</code> = <code>gen_mols/</code> 側を指す）</td></tr>
+    <tr><td><code>README_ja.md</code> の記載</td><td>なし（L153 は <code>src/gen_mols/gen_safe.sh</code>）</td></tr>
+    <tr><td><code>timeout_handler</code> の共有</td><td>なし（<code>src/func/generation_safe_func.py</code> が独自に定義）</td></tr>
+  </table>
+</section>
+
+<section id="plan">
+  <h2>実装計画</h2>
+  <ol>
+    <article class="step" data-step="1">
+      <li>
+        <h3>Step 1: <code>src/gen_safe.py</code> を削除する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_safe.py</code>（削除）</p>
+        <p><strong>変更内容:</strong> <code>git rm src/gen_safe.py</code> でファイルを削除する。git 履歴には残るため必要になれば復元可能。</p>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+    <article class="step" data-step="2">
+      <li>
+        <h3>Step 2: 削除後の健全性確認</h3>
+        <p><strong>対象ファイル:</strong> なし（検証のみ）</p>
+        <p><strong>変更内容:</strong>
+          <code>grep -rn "gen_safe" --include="*.py" --include="*.sh" --include="*.md" .</code> を再実行し、
+          生きているコード／ドキュメントに壊れた参照が残っていないことを確認する。あわせて
+          <code>python -m py_compile src/gen_mols/gen_safe.py src/func/generation_safe_func.py</code> が通ることを確認する。</p>
+        <p><strong>依存関係:</strong> Step 1 の後</p>
+      </li>
+    </article>
+  </ol>
+</section>
+
+<section id="out-of-scope">
+  <h2>今回は触らないもの</h2>
+  <ul>
+    <li><code>src/gen_safe_denovo.py</code>: 同様に <code>gen_inference_time.md</code> でスコープ外とされているが、今回のユーザー指示は <code>src/gen_safe.py</code> のみ。要否は別途確認する。</li>
+    <li><code>.plans_for_ai/</code> / <code>.reviews_by_ai/</code> 配下の過去の計画・レビュー文書: 作成時点の記録なので書き換えない。</li>
+    <li>コミットするかどうかはユーザーの指示を待つ。</li>
+  </ul>
+</section>
+</body>
+</html>

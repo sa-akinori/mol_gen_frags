@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Plan: PromptSMILES の学習データ重複排除を smiles 基準に修正 (2026-08-02)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; }
+  h1 { border-bottom: 2px solid #333; }
+  h2 { border-bottom: 1px solid #ccc; margin-top: 2em; }
+  .step { margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+  pre { background: #f4f4f4; padding: 0.8em; border-radius: 4px; overflow-x: auto; }
+  table { border-collapse: collapse; margin: 1em 0; width: 100%; }
+  th, td { border: 1px solid #ddd; padding: 0.4em 0.7em; text-align: left; font-size: 0.95em; }
+  th { background: #f4f4f4; }
+  .warn { background: #fff3f3; border-left: 4px solid #d9534f; padding: 0.8em 1em; margin: 1em 0; }
+  blockquote { border-left: 4px solid #ccc; margin-left: 0; padding-left: 1em; color: #555; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plan: PromptSMILES の学習データ重複排除を smiles 基準に修正</h1>
+  <p class="meta">Date: 2026-08-02 | Status: pending-approval</p>
+</header>
+
+<section id="overview">
+  <h2>概要</h2>
+  <p><code>src/make_datasets.py</code> の PromptSMILES 出力が SAFE の <code>full_safe</code> 基準の重複排除を流用しているため、
+  <strong>rc_cms で同一分子が 3.51 回重複</strong>して学習コーパスに入る。</p>
+
+  <h3>原則（ユーザー判断）</h3>
+  <p>学習データの重複排除は「<strong>その手法が実際に生成する表現</strong>」の列で行う。</p>
+  <table>
+    <tr><th>手法</th><th>生成するもの</th><th>dedup 対象</th><th>現状</th></tr>
+    <tr><td>SAFE</td><td>SAFE 文字列</td><td><code>full_safe</code></td><td>正しい</td></tr>
+    <tr><td>FragGPT</td><td>FU-SMILES</td><td><code>full_fragments</code></td><td>正しい</td></tr>
+    <tr><td><strong>PromptSMILES</strong></td><td><strong>プレーンな SMILES</strong></td><td><strong><code>smiles</code></strong></td><td><strong>誤り（<code>full_safe</code> 由来）</strong></td></tr>
+  </table>
+  <p>SAFE と FragGPT は SMILES を生成しないので、同じ表現に潰れる分子（二重結合の切断で E/Z が消えた
+  立体異性体など）はモデルにとって区別不能であり、表現で dedup するのが正しい。
+  一方 PromptSMILES はプレーンな SMILES を生成するため、<code>smiles</code> で dedup しなければならない。</p>
+
+  <div class="warn">
+    <h3>実測（<code>make_datasets.py</code> と同一手順を断面で再現）</h3>
+    <table>
+      <tr><th></th><th>train 行数</th><th>ユニーク分子数</th><th>1分子あたり</th></tr>
+      <tr><td>brics</td><td>16,279</td><td>16,279</td><td>1.00（問題なし）</td></tr>
+      <tr><td><strong>rc_cms</strong></td><td><strong>41,764</strong></td><td><strong>11,913</strong></td><td><strong>3.51（重複）</strong></td></tr>
+    </table>
+    <p>brics は BRICS 分解が決定的で 1分子1パターンのため露見しない。
+    rc_cms は <code>RandomFragmentize</code> が分子ごとに複数パターンを作るため重複する。</p>
+  </div>
+
+  <h3>なぜ問題か</h3>
+  <p><code>.plans_for_ai/2026-07-28/add_promptsmiles_baseline.md</code> で明示的に決めた前提が崩れる。</p>
+  <blockquote>
+    <strong>Augmentation: 行わない（ユーザー判断）</strong>。<strong>1分子 = 1系列</strong>とし、学習データはカノニカルSMILESのみ。
+    理由: データ量が他手法に対して極端に多くなり、公平な比較にならないため。
+  </blockquote>
+  <p>rc_cms では実質 3.51 倍の水増しとなり、同一分子を繰り返し学習することになる。</p>
+</section>
+
+<section id="plan">
+  <h2>実装計画</h2>
+  <ol>
+    <article class="step" data-step="1">
+      <li>
+        <h3>Step 1: PromptSMILES の train / validation を smiles 基準の dedup に変更</h3>
+        <p><strong>対象ファイル:</strong> <code>src/make_datasets.py</code></p>
+        <p><strong>変更内容:</strong> PromptSMILES ブロック（<code>promptsmiles_train</code> / <code>promptsmiles_valid</code>）の
+        <code>Dataset.from_pandas(...)</code> に <code>drop_duplicates('smiles').reset_index(drop=True)</code> を追加する。</p>
+        <pre><code>promptsmiles_train = Dataset.from_pandas(safe_tr.loc[:, ['smiles', 'pass_fragments']].drop_duplicates('smiles').reset_index(drop=True))
+promptsmiles_valid = Dataset.from_pandas(safe_val.loc[:, ['smiles', 'pass_fragments']].drop_duplicates('smiles').reset_index(drop=True))</code></pre>
+        <ul>
+          <li><strong><code>promptsmiles_test</code> は変更しない。</strong> 生成の入力は <code>pass_fragments</code> であり、
+            RFFMG・SAFE・FragGPT と行を揃える必要があるため（1分子あたり最大5行のまま）。</li>
+          <li>なぜ <code>full_safe</code> ではなく <code>smiles</code> で dedup するのかを<strong>1行コメントで残す</strong>
+            （PromptSMILES はプレーンな SMILES を生成するため、という非自明な理由）。</li>
+          <li>SAFE と FragGPT の出力ブロックは<strong>一切変更しない</strong>。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="2">
+      <li>
+        <h3>Step 2: <code>train_promptsmiles.py</code> の docstring を実態に合わせる</h3>
+        <p><strong>対象ファイル:</strong> <code>src/train_model/train_promptsmiles.py</code></p>
+        <p><strong>変更内容:</strong> <code>read_corpus()</code> の docstring にある以下の記述が brics での計測値であり、
+        rc_cms には当てはまらないため修正する。</p>
+        <blockquote>both splits hold one molecule per row (measured: train 1,714,298 rows / 1,714,298 molecules,
+        validation 45,203 rows / 45,203 molecules), so no deduplication is needed.</blockquote>
+        <ul>
+          <li>「重複排除は不要」ではなく「<code>make_datasets.py</code> が <code>smiles</code> で重複排除済みなので 1分子1行」
+            という記述に改める。</li>
+          <li>計測値が brics のものであることを明示するか、frag_method 非依存の書き方にする。</li>
+          <li><strong>学習ロジックは一切変更しない。</strong></li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 1 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="3">
+      <li>
+        <h3>Step 3: <code>next_plan.md</code> に立体比較の課題を追記</h3>
+        <p><strong>対象ファイル:</strong> <code>next_plan.md</code></p>
+        <p><strong>変更内容:</strong> 「保留中の項目」に以下を追加する。</p>
+        <ul>
+          <li><strong>評価の立体比較が表現ベース手法に不利に働く</strong>（未対応・今後実装予定）
+            <ul>
+              <li><code>evaluation_func.py</code> の <code>Smi2CanSmi</code> は <code>Chem.MolToSmiles(mol)</code>
+                （<code>isomericSmiles=True</code> が既定）を使うため、立体を含めて学習分子・正解分子と比較している</li>
+              <li>SAFE と FragGPT は二重結合を切った箇所の E/Z を復元できない
+                （FragGPT の組立の実測: 立体無視 100% / 立体込み 86.1%）</li>
+              <li>実測（brics）: 学習分子の 30.7%、test 分子の 36.4% が立体情報を持つ</li>
+              <li>影響: 生成分子の立体が落ちると学習分子と一致しないため <strong>novelty が過大</strong>、
+                正解分子とも一致しないため <strong>top-k accuracy が過小</strong>に出る。
+                SMILES を直接生成する RFFMG は影響を受けないため、手法間比較にバイアスが入る</li>
+              <li>ベースライン比較表を作る前に対応する</li>
+            </ul>
+          </li>
+          <li>PromptSMILES の dedup 修正（本計画）を実施済みとして記録する。</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 2 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="4">
+      <li>
+        <h3>Step 4: 検証（メインエージェントが実施）</h3>
+        <p><strong>対象ファイル:</strong> 実行のみ（コード変更なし）</p>
+        <p><strong>変更内容:</strong> GPU 不要の範囲で確認する。</p>
+        <ul>
+          <li><code>make_datasets.py</code> の構文チェック</li>
+          <li>同一手順を断面で再現し、promptsmiles train が <strong>brics・rc_cms とも 1分子1行</strong>になること</li>
+          <li><strong>SAFE と FragGPT の出力が変わっていないこと</strong>（行数・列構成）</li>
+          <li><code>promptsmiles_test</code> の行数が変わっていないこと（RFFMG・SAFE・FragGPT と揃うこと）</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 3 の後</p>
+      </li>
+    </article>
+  </ol>
+</section>
+
+<section id="impact">
+  <h2>影響範囲</h2>
+  <ul>
+    <li><strong>brics</strong>: 変化なし（既に 1分子1行）</li>
+    <li><strong>rc_cms</strong>: PromptSMILES の train が 41,764行 → 11,913行 相当に減る（断面での実測値）</li>
+    <li>SAFE・FragGPT・RFFMG の出力は変わらない</li>
+    <li><code>data/promptsmiles/</code> はまだ生成されていないため、既存データの作り直しは発生しない</li>
+  </ul>
+</section>
+
+<section id="out-of-scope">
+  <h2>スコープ外</h2>
+  <ul>
+    <li>SAFE・FragGPT の dedup 対象（現行が正しい）</li>
+    <li>立体比較の問題そのものの修正（<code>next_plan.md</code> への記録のみ。実装は今後）</li>
+    <li><code>evaluation.py</code> 等の <code>sampling_num</code> 階層の欠落（既存の保留項目）</li>
+  </ul>
+</section>
+</body>
+</html>

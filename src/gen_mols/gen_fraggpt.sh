@@ -12,5 +12,6 @@ conda activate env_fraggpt
 
 FRAG_NAME="brics" # "brics" or "rc_cms"
 MODEL_VER="finetuning" # "finetuning", "from_scratch"
+GEN_METHOD="beam" # "sampling" (multinomial) or "beam" (beam search, as used by RFFMG and SAFE)
 
-python src/gen_mols/gen_fraggpt.py --frag_method ${FRAG_NAME} --model_ver ${MODEL_VER} --n_samples 50 --max_length 256 --num_beams 50 --batch_size 24 --random_seed 42
+python src/gen_mols/gen_fraggpt.py --frag_method ${FRAG_NAME} --model_ver ${MODEL_VER} --gen_method ${GEN_METHOD} --n_samples 50 --max_length 256 --num_beams 50 --batch_size 24 --random_seed 42

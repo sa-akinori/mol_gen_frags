@@ -13,7 +13,6 @@ import time
 import sys
 import pickle
 import random
-from joblib import Parallel, delayed, cpu_count
 import logging
 import torch
 import transformers
@@ -498,25 +497,6 @@ def applyfunc_with_batch(func, x, batchsize=10000):
 		y = func(x)
 	return y
 
-def applyfunc_with_batch_mt(func, x, nworkers=8):
-	"""
-	Apply function to splitted x into reasonable number of data.
-	This function should be called when using SVM or SVR sklearn.
-	"""
-	pass
-
-	# if isinstance(x, pd.DataFrame):
-	#     x = x.values
-
-	# if nworkers == -1:
-	#     nworkers = psutil.cpu_count() -1
-	# split_x = np.array_split(x, nworkers)
-
-	# pool = multiprocessing.Pool(nworkers)
-	# ret_y = joblib.Parallel(n_jobs=nworkers)(joblib.delayed(func)(x_p) for x_p in split_x)
-	# ret_y = np.concatenate(ret_y)
-	# return ret_y
-
 def search_exist_suffix(f_path):
 	dirname, basename = os.path.split(f_path)
 
@@ -667,13 +647,38 @@ def pickle_load(
 	return data
 	
 def pickle_save(
-	path:str, 
+	path:str,
 	data,
 	protocol=5
 ):
 	with open(path, 'wb') as f:
 		pickle.dump(data, f, protocol=protocol)
-        
+
+def save_file(target: str, save_path: str) -> None:
+	"""Write a string to a UTF-8 text file.
+
+	Newlines are written as LF regardless of the platform (``newline="\\n"``), so that
+	the generated data files stay byte-identical across environments.
+
+	Args:
+		target: Text to write.
+		save_path: Destination file path.
+	"""
+	with open(save_path, "w", newline="\n", encoding="utf-8") as f:
+		f.write(target)
+
+def load_file(file_name: str) -> list[str]:
+	"""Read a text file as a list of lines without their trailing whitespace.
+
+	Args:
+		file_name: Path of the file to read.
+
+	Returns:
+		The lines of the file, each stripped of trailing whitespace (including the newline).
+	"""
+	with open(file_name) as f:
+		return [s.rstrip() for s in f.readlines()]
+
 if __name__ =='__main__':
 	a = MakeRandomTuplesFromArrays([range(1000), range(2000)], 100000, buff=1000)
 	print(1)

@@ -8,25 +8,10 @@ import itertools
 from tqdm import tqdm
 from collections import Counter
 from func.fragmentation import GetNHA, RemoveAtomIsotope
-from func.utility import pickle_save, canonical_smiles
+from func.utility import pickle_save, canonical_smiles, save_file, load_file
 from concurrent.futures import ProcessPoolExecutor
 import argparse
 
-def save_file(
-    target,
-    save_file
-    ):
-    with open(save_file, "w", newline="\n", encoding="utf-8") as f:
-        f.write(target)
-        
-def load_file(
-    file_name:str
-    ):
-    with open(file_name) as f:
-        data = [s.rstrip() for s in f.readlines()]
-        
-    return data
-    
 def process_reaction(reaction):
     reaction = reaction.split(">>")
     return (canonical_smiles(reaction[0]), canonical_smiles(reaction[1]))
@@ -99,9 +84,6 @@ if __name__=='__main__':
         save_file(source, f'{rffmg_dir}/normal/debug/{name}.source')
         save_file(target, f'{rffmg_dir}/normal/debug/{name}.target')
     
-    # SAFE, PromptSMILES and FragGPT datasets have no sampling_num level (they are written to
-    # data/{safe,promptsmiles,fraggpt}/{frag}/normal), so only build them for the canonical
-    # sampling_num (the --sampling_num default) to avoid overwriting with another split.
     if args.sampling_num == 5:
         # safe
         safe_tr  = safe_frags.query('smiles in @tr_smiles').drop_duplicates(subset='full_safe').reset_index(drop=True)
@@ -137,34 +119,31 @@ if __name__=='__main__':
         os.makedirs(f'{fd}/safe/{frag_method}/normal/debug', exist_ok=True)
         debug_os_dataset.save_to_disk(f'{fd}/safe/{frag_method}/normal/debug')
 
-        # promptsmiles: plain SMILES (one molecule per line) reusing the split shared with RFFMG and SAFE.
-        # The test set is the already subsampled te_smiles, so the evaluated molecules are identical.
+        # promptsmiles
         promptsmiles_dir = f'{fd}/promptsmiles/{frag_method}/normal'
-        os.makedirs(f'{promptsmiles_dir}/debug', exist_ok=True)
-        for smiles, name in zip([tr_smiles, val_smiles, te_smiles], ["train", "val", "test"]):
-            save_file("\n".join(smiles) + "\n", f'{promptsmiles_dir}/{name}.smi')
-            save_file("\n".join(smiles[:10000]) + "\n", f'{promptsmiles_dir}/debug/{name}.smi')
-            print(f'promptsmiles {name}: {len(smiles)} molecules -> {promptsmiles_dir}/{name}.smi')
+        promptsmiles_train = Dataset.from_pandas(safe_tr.loc[:, ['smiles', 'pass_fragments']].drop_duplicates('smiles').reset_index(drop=True))
+        promptsmiles_valid = Dataset.from_pandas(safe_val.loc[:, ['smiles', 'pass_fragments']].drop_duplicates('smiles').reset_index(drop=True))
+        promptsmiles_test  = Dataset.from_pandas(safe_te.loc[:, ['smiles', 'pass_fragments']])
+        promptsmiles_dataset = DatasetDict({
+            "train": promptsmiles_train,
+            "validation": promptsmiles_valid,
+            "test": promptsmiles_test
+        })
+        os.makedirs(promptsmiles_dir, exist_ok=True)
+        promptsmiles_dataset.save_to_disk(promptsmiles_dir)
 
         # fraggpt: FU-SMILES corpus (one fragmentation pattern per line) on the same split.
-        # `full_fragments` already is FU-SMILES: BRICSFragmentize / RandomFragmentize label every
-        # cut bond with a pair of [i*] dummy atoms, so no extra fragmentation step is needed.
-        # No test file is written here: gen_fraggpt.py prompts with the SAFE test split, so that
-        # RFFMG, SAFE, PromptSMILES and FragGPT all start from identical fragment sets.
         fraggpt_dir = f'{fd}/fraggpt/{frag_method}/normal'
-        os.makedirs(f'{fraggpt_dir}/debug', exist_ok=True)
-        for data, name in zip([rffmg_tr, rffmg_val], ["train", "val"]):
-            fusmiles = data['full_fragments'].drop_duplicates().tolist()
-            save_file("\n".join(fusmiles) + "\n", f'{fraggpt_dir}/{name}.smi')
-            save_file("\n".join(fusmiles[:10000]) + "\n", f'{fraggpt_dir}/debug/{name}.smi')
-            print(f'fraggpt {name}: {len(fusmiles)} FU-SMILES -> {fraggpt_dir}/{name}.smi')
-
-        # Molecules behind the training corpus, read by src/evaluation.py for the novelty check.
-        # Identical to the promptsmiles train.smi, but written independently to keep the two
-        # baselines free of any dependency on each other.
-        save_file("\n".join(tr_smiles) + "\n", f'{fraggpt_dir}/train.target')
-        save_file("\n".join(tr_smiles[:10000]) + "\n", f'{fraggpt_dir}/debug/train.target')
-        print(f'fraggpt train molecules: {len(tr_smiles)} -> {fraggpt_dir}/train.target')
+        fraggpt_train = Dataset.from_pandas(rffmg_tr.loc[:, ['smiles', 'full_fragments']].drop_duplicates('full_fragments').reset_index(drop=True))
+        fraggpt_valid = Dataset.from_pandas(rffmg_val.loc[:, ['smiles', 'full_fragments']].drop_duplicates('full_fragments').reset_index(drop=True))
+        fraggpt_test  = Dataset.from_pandas(safe_te.loc[:, ['smiles', 'pass_fragments']])
+        fraggpt_dataset = DatasetDict({
+            "train": fraggpt_train,
+            "validation": fraggpt_valid,
+            "test": fraggpt_test
+        })
+        os.makedirs(fraggpt_dir, exist_ok=True)
+        fraggpt_dataset.save_to_disk(fraggpt_dir)
 
     # # Creation of datasets to evaluate the limitations of molecular generation using RFFMG
     # rffmg_frags = pd.read_csv(f'{rffmg_dir}/full_dataset.csv', index_col=0)

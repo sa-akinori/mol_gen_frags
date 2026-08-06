@@ -21,6 +21,8 @@ from transformers import AutoTokenizer, EarlyStoppingCallback, GPT2Config, GPT2L
 
 from func.utility import BASEPATH, set_seed
 
+PRETRAINED_MODEL = "entropy/gpt2_zinc_87m"
+
 def read_lines(path: Path) -> list[str]:
     """Read a newline-separated text file into a list of stripped lines.
 
@@ -106,8 +108,6 @@ def parse_args() -> argparse.Namespace:
                         help="Training mode (default: finetuning)")
     parser.add_argument("--sampling_num", type=int, default=10, choices=[5, 10],
                         help="Fragment-sampling multiplier N, selecting the data/rffmg/<frag>/<N>times_sampling slice (default: 10)")
-    parser.add_argument("--pretrain", type=str, default="entropy/gpt2_zinc_87m",
-                        help=f"Pretrained model/tokenizer id (default: entropy/gpt2_zinc_87m)")
     parser.add_argument("--num_train_epochs", type=int, default=50,
                         help="Number of training epochs (default: 50)")
     parser.add_argument("--learning_rate", type=float, default=1e-4,
@@ -138,18 +138,12 @@ if __name__ == "__main__":
     # Seed everything for reproducibility.
     set_seed(args.seed)
 
-    # Tokenizer is shared by both modes (always from the ZINC-pretrained model).
-    tokenizer = AutoTokenizer.from_pretrained(args.pretrain)
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    if tokenizer.bos_token_id is None or tokenizer.eos_token_id is None:
-        raise ValueError("Tokenizer must define both bos_token and eos_token for RFFMG training.")
-
     # Model: finetune from pretrained weights or reinitialize the same config.
+    tokenizer = AutoTokenizer.from_pretrained(PRETRAINED_MODEL)
     if args.mode == "finetuning":
-        model = GPT2LMHeadModel.from_pretrained(args.pretrain)
+        model = GPT2LMHeadModel.from_pretrained(PRETRAINED_MODEL)
     else:  # from_scratch
-        config = GPT2Config.from_pretrained(args.pretrain)
+        config = GPT2Config.from_pretrained(PRETRAINED_MODEL)
         model = GPT2LMHeadModel(config)
     model.config.pad_token_id = tokenizer.pad_token_id
 

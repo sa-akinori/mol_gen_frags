@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Plan: save_file / load_file を func/utility.py に集約する (2026-08-04)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; }
+  h1 { border-bottom: 2px solid #333; }
+  h2 { border-bottom: 1px solid #ccc; margin-top: 2em; }
+  .step { margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+  pre { background: #f4f4f4; padding: 0.8em; border-radius: 4px; overflow-x: auto; }
+  table { border-collapse: collapse; margin: 1em 0; width: 100%; }
+  th, td { border: 1px solid #ddd; padding: 0.4em 0.7em; text-align: left; font-size: 0.95em; }
+  th { background: #f4f4f4; }
+  .note { background: #eef6ff; border-left: 4px solid #4a90d9; padding: 0.8em 1em; margin: 1em 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plan: save_file / load_file を func/utility.py に集約する</h1>
+  <p class="meta">Date: 2026-08-04 | Status: pending-approval</p>
+</header>
+
+<section id="overview">
+  <h2>概要</h2>
+  <p>同一の <code>save_file</code> が <strong>3箇所に重複定義</strong>されており、対になる
+  <code>load_file</code> は <code>make_datasets.py</code> にしか無いため、
+  <code>build_augmented_dataset.py</code> が <code>sys.path</code> を書き換えて実行スクリプトから
+  import するという不自然な構造になっている。両方を <code>src/func/utility.py</code> に移して1箇所にする。</p>
+
+  <h3>重複の実測（AST で本体を比較）</h3>
+  <p>3つとも<strong>本体は1文字も違わない</strong>。差は引数名だけ。</p>
+  <pre><code>with open(&lt;path&gt;, 'w', newline='\n', encoding='utf-8') as f:
+    f.write(target)</code></pre>
+  <table>
+    <tr><th>定義</th><th>引数</th><th>型ヒント / docstring</th></tr>
+    <tr><td><code>src/func/generation_fraggpt_func.py:15</code></td><td><code>(target, save_path)</code></td><td>あり</td></tr>
+    <tr><td><code>src/gen_mols/gen_promptsmiles.py:99</code></td><td><code>(target, save_path)</code></td><td>あり（上と完全一致）</td></tr>
+    <tr><td><code>src/make_datasets.py:15</code></td><td><code>(target, save_file)</code></td><td>なし。<strong>引数名が関数名を隠している</strong></td></tr>
+  </table>
+  <p><code>load_file</code> は <code>src/make_datasets.py:22</code> のみ（型ヒントは引数のみ、戻り値なし）。</p>
+
+  <h3>現在の呼び出し構造</h3>
+  <pre><code>make_datasets.py            save_file / load_file を定義して自分で使う
+gen_promptsmiles.py         save_file を自前で定義
+generation_fraggpt_func.py  save_file を自前で定義
+build_augmented_dataset.py  sys.path.insert 後に from make_datasets import load_file, save_file
+                            ← 実行スクリプトからの import。utility.py に移せば不要になる</code></pre>
+
+  <h3>移設先の確認（実測）</h3>
+  <ul>
+    <li><code>src/func/utility.py</code> に <code>save_file</code> / <code>load_file</code> と<strong>同名の定義は無い</strong>（衝突しない）</li>
+    <li><code>utility.py</code> に <code>__all__</code> は無いため、<code>from func.utility import *</code> で自動的に公開される</li>
+    <li><code>import *</code> しているのは <code>evaluation.py</code> / <code>analyze_predictions.py</code> /
+      <code>gen_frags/rffmg_frags.py</code> の3ファイル。いずれも <code>save_file</code> / <code>load_file</code> を
+      自前定義していないため、名前が隠される心配は無い</li>
+  </ul>
+</section>
+
+<section id="plan">
+  <h2>実装計画</h2>
+  <ol>
+    <article class="step" data-step="1">
+      <li>
+        <h3>Step 1: <code>func/utility.py</code> に2関数を追加する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/func/utility.py</code></p>
+        <p><strong>変更内容:</strong> 以下2つを追加する。既存の <code>pickle_save</code> / <code>pickle_load</code> の近くに置き、周囲のコードスタイルに合わせること。</p>
+        <ul>
+          <li><code>save_file(target: str, save_path: str) -&gt; None</code><br>
+            本体は既存3実装と同一（<code>newline="\n"</code>, <code>encoding="utf-8"</code>）。
+            引数名は型ヒント付きの版（<code>save_path</code>）を採用する。
+            <code>make_datasets.py</code> 版の引数名 <code>save_file</code> は関数名を隠すため採用しない。</li>
+          <li><code>load_file(file_name: str) -&gt; list[str]</code><br>
+            <code>make_datasets.py:22</code> の実装（各行を <code>rstrip()</code> してリストで返す）をそのまま移す。
+            戻り値の型ヒントを補う。</li>
+          <li>両方に Google style docstring を付ける。</li>
+          <li><strong><code>newline="\n"</code> を明示している点は非自明な制約</strong>（環境に依らず LF で書き出すため）なので、docstring で触れること。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="2">
+      <li>
+        <h3>Step 2: <code>make_datasets.py</code> の定義を削除して import に置き換える</h3>
+        <p><strong>対象ファイル:</strong> <code>src/make_datasets.py</code></p>
+        <ul>
+          <li>15-28行付近の <code>save_file</code> / <code>load_file</code> の定義を削除する。</li>
+          <li><code>from func.utility import ...</code> に <code>save_file</code>, <code>load_file</code> を追加する（既存の import 文の形に合わせること）。</li>
+          <li>呼び出し箇所（90, 91, 99, 100, 187, 188行 と 173, 174行）は<strong>引数の渡し方が位置引数なので変更不要</strong>。コメントアウト済みの呼び出しも触らない。</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 1 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="3">
+      <li>
+        <h3>Step 3: <code>gen_promptsmiles.py</code> の定義を削除して import に置き換える</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_mols/gen_promptsmiles.py</code></p>
+        <p><strong>変更内容:</strong> 99行付近の <code>save_file</code> 定義を削除し、既存の
+        <code>from func.utility import ...</code> に <code>save_file</code> を追加する。呼び出し（484, 485行）は変更不要。</p>
+        <p><strong>依存関係:</strong> Step 1 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="4">
+      <li>
+        <h3>Step 4: <code>generation_fraggpt_func.py</code> の定義を削除して import に置き換える</h3>
+        <p><strong>対象ファイル:</strong> <code>src/func/generation_fraggpt_func.py</code></p>
+        <p><strong>変更内容:</strong> 15行付近の <code>save_file</code> 定義を削除し、既存の
+        <code>from func.utility import BASEPATH, LogFile</code> に <code>save_file</code> を追加する。呼び出し（175, 176行）は変更不要。</p>
+        <p><strong>依存関係:</strong> Step 1 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="5">
+      <li>
+        <h3>Step 5: <code>build_augmented_dataset.py</code> の import 元を変更する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/recursion_train/build_augmented_dataset.py</code></p>
+        <ul>
+          <li><code>from make_datasets import load_file, save_file</code>（24行）を削除し、
+            <code>from func.utility import BASEPATH</code>（23行）に <code>load_file</code>, <code>save_file</code> を加える。</li>
+          <li><strong><code>sys.path.insert(0, ...)</code>（22行）が他の用途に使われていないか確認すること。</strong>
+            <code>make_datasets</code> の import のためだけなら、<code>import sys</code> と
+            <code>from pathlib import Path</code> も含めて削除できる。他で使っていれば残す。</li>
+          <li>呼び出し箇所（79, 80, 90, 91, 96, 119行）は変更不要。</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 1 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="6">
+      <li>
+        <h3>Step 6: 検証（メインエージェントが実施）</h3>
+        <p><strong>対象ファイル:</strong> 実行のみ（コード変更なし）</p>
+        <ul>
+          <li>全変更ファイルの構文チェックと import 確認</li>
+          <li><code>save_file</code> / <code>load_file</code> の定義が <code>utility.py</code> の1箇所だけになっていることを grep で確認</li>
+          <li><code>save_file</code> → <code>load_file</code> の往復で内容が保たれること（LF 改行、末尾行の扱い）</li>
+          <li><code>from func.utility import *</code> を使う3ファイル（<code>evaluation.py</code> /
+            <code>analyze_predictions.py</code> / <code>gen_frags/rffmg_frags.py</code>）が import できること</li>
+          <li><code>build_augmented_dataset.py</code> が import できること</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 5 の後</p>
+      </li>
+    </article>
+  </ol>
+</section>
+
+<section id="out-of-scope">
+  <h2>スコープ外</h2>
+  <ul>
+    <li><code>MakeFolder</code> / <code>MakeFolders</code> / <code>MakeFolderWithCurrentFuncName</code> の削除
+      （いずれも <code>utility.py</code> の外から呼ばれていない未使用コードだが、今回は触らない）</li>
+    <li><code>utility.py</code> の他の関数の整理</li>
+    <li><code>from func.utility import *</code> を明示 import に改める作業</li>
+  </ul>
+</section>
+
+<section id="note">
+  <h2>注意</h2>
+  <div class="note">
+    <p><code>utility.py</code> は RFFMG・SAFE を含む全手法から読まれる共有モジュールである。
+    2関数の<strong>追加</strong>のみで既存の名前は一切変更しないため、他手法への影響は無い想定だが、
+    Step 6 で 3つの <code>import *</code> 経路が通ることを必ず確認する。</p>
+  </div>
+</section>
+</body>
+</html>
