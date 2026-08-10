@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Plan: PromptSMILES を他手法と同じラッパ構造に揃える (2026-08-08)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; }
+  h1 { border-bottom: 2px solid #333; }
+  h2 { border-bottom: 1px solid #ccc; margin-top: 2em; }
+  .step { margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+  pre { background: #f4f4f4; padding: 0.8em; border-radius: 4px; overflow-x: auto; }
+  table { border-collapse: collapse; margin: 1em 0; width: 100%; }
+  th, td { border: 1px solid #ddd; padding: 0.4em 0.7em; text-align: left; font-size: 0.95em; }
+  th { background: #f4f4f4; }
+  .note { background: #eef6ff; border-left: 4px solid #4a90d9; padding: 0.8em 1em; margin: 1em 0; }
+  .warn { background: #fff3f3; border-left: 4px solid #d9534f; padding: 0.8em 1em; margin: 1em 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plan: PromptSMILES を他手法と同じラッパ構造に揃える</h1>
+  <p class="meta">Date: 2026-08-08 | Status: approved</p>
+</header>
+
+<section id="overview">
+  <h2>概要</h2>
+  <p>PromptSMILES だけが <code>generation_time.json</code> を出しておらず、生成速度を手法間で
+  比較できない。原因は構造の違いで、他3手法が「薄いラッパ + 生成本体」の2ファイル構成なのに対し、
+  PromptSMILES は <code>gen_mols/gen_promptsmiles.py</code>（380行）が生成本体そのものになっている。</p>
+
+  <table>
+    <tr><th>手法</th><th>ラッパ</th><th>生成本体</th></tr>
+    <tr><td>RFFMG</td><td><code>gen_mols/gen_rffmg.py</code></td>
+      <td>外部 CLI <code>t5chem predict</code> / <code>train_model/generate_gpt.py</code></td></tr>
+    <tr><td>SAFE</td><td><code>gen_mols/gen_safe.py</code></td>
+      <td><code>func/generation_safe_func.py</code></td></tr>
+    <tr><td>FragGPT</td><td><code>gen_mols/gen_fraggpt.py</code></td>
+      <td><code>func/generation_fraggpt_func.py</code></td></tr>
+    <tr><td><strong>PromptSMILES</strong></td><td><strong>なし</strong></td>
+      <td><code>gen_mols/gen_promptsmiles.py</code>（本体が直接ここにある）</td></tr>
+  </table>
+
+  <p>ラッパは <code>func.generation_time.run_and_record_time</code> で生成本体をサブプロセスとして
+  起動し、<strong>モデルロードを含む実行時間</strong>を計測して <code>generation_time.json</code> を
+  書く。PromptSMILES にも同じ構造を与えることで、測定基準を揃えると同時にコードの不揃いも解消する。</p>
+
+  <h3>計測基準の差（実測）</h3>
+  <div class="note">
+    <p><code>generation_time.json</code> には python の起動と import の時間も含まれる。
+    promptsmiles 環境で <code>import torch, transformers, promptsmiles, pandas, datasets</code> に
+    かかるのは <strong>1.17秒</strong>。82,441行を16時間かける実行では
+    <code>sec_per_molecule</code> に 0.00001秒しか効かないが、<strong>基準を揃える</strong>ことを
+    優先してラッパ構造にする（ユーザー判断）。</p>
+  </div>
+
+  <h3><code>--additional_path</code> を追加する理由</h3>
+  <div class="warn">
+    <p>ラッパは生成本体と<strong>同じ <code>output_dir</code> を計算する必要がある</strong>
+    （JSON の書き出し先と <code>predictions.csv</code> の行数カウントのため）。現在
+    PromptSMILES は <code>normal</code> を直書きしているので、そのままだと2ファイルに同じ
+    直書きが並ぶ。これは <code>gen_fraggpt.py</code> で実際に起きていた不具合（出力先が食い違い、
+    timing JSON が別 run を上書きする）と同じ形なので、FragGPT と同様に
+    <code>--additional_path</code> を引数にして両者が同じ値を使うようにする。</p>
+  </div>
+
+  <h3>既存の生成結果への影響</h3>
+  <p><code>results/promptsmiles/</code> には <code>predictions.csv</code> がまだ無い（生成未実施）。
+  また <code>joblib</code> 未導入で生成スクリプト自体が起動しないため、
+  <strong>この変更で失われる結果はない</strong>。</p>
+
+  <h2>スコープ外</h2>
+  <ul>
+    <li><code>requirements/promptsmiles_requirements.txt</code> への <code>joblib</code> 追加
+      （ユーザーが別途対応）</li>
+    <li>生成ロジックの変更（移動のみ。<strong>1行も書き換えない</strong>）</li>
+    <li><code>--n_samples</code> を変えると結果が変わる件（修正に25倍のコストがかかるため対応しない）</li>
+  </ul>
+</section>
+
+<section id="plan">
+  <h2>実装計画</h2>
+  <ol>
+    <article class="step" data-step="1">
+      <li>
+        <h3>Step 1: 生成本体を <code>func/generation_promptsmiles_func.py</code> に移す</h3>
+        <p><strong>対象ファイル:</strong> <code>src/func/generation_promptsmiles_func.py</code>（新規）</p>
+        <ul>
+          <li><code>src/gen_mols/gen_promptsmiles.py</code> の<strong>全内容をそのまま移す</strong>。
+            モジュール docstring、import、<code>MIN_LINK_FRAGMENTS</code>、<code>log_line</code>、
+            <code>parse_fragments</code>、<code>select_prompt_fragments</code>、
+            <code>to_prediction_row</code>、<code>format_run_summary</code>、
+            <code>GPT2PromptSampler</code>、<code>build_prompter</code>、<code>parse_args</code>、
+            <code>if __name__ == "__main__":</code> ブロック</li>
+          <li><strong><code>if __name__ == "__main__":</code> ブロックの中身を <code>main()</code>
+            関数に切り出す</strong>。<code>func/generation_fraggpt_func.py</code> と同じ形
+            （<code>def main() -&gt; None:</code> + 末尾に
+            <code>if __name__ == "__main__": main()</code>）にすること。</li>
+          <li><code>parse_args</code> に <code>--additional_path</code>
+            （<code>type=str, default="normal"</code>）を追加する。help は
+            <code>gen_fraggpt.py:26</code> と同じ文言に揃えること。</li>
+          <li><code>output_dir</code> の <code>normal</code> 直書きを
+            <code>{args.additional_path}</code> に変える。</li>
+          <li><strong>生成ロジックは1行も変更しない。</strong> 移動と <code>main()</code> への
+            切り出し、<code>--additional_path</code> の追加だけ。</li>
+          <li>モジュール docstring の冒頭を、<code>func/generation_fraggpt_func.py</code> /
+            <code>func/generation_safe_func.py</code> と同じ体裁（このファイルが生成本体で
+            あることが分かる形）に整えること。既存の説明本文は残す。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="2">
+      <li>
+        <h3>Step 2: <code>gen_mols/gen_promptsmiles.py</code> をラッパに書き換える</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_mols/gen_promptsmiles.py</code></p>
+        <ul>
+          <li>中身を全部捨て、<code>src/gen_mols/gen_fraggpt.py</code> と<strong>同じ構造</strong>の
+            ラッパにする。</li>
+          <li>モジュール docstring は <code>gen_fraggpt.py:1-6</code> と同じ体裁で、参照先を
+            <code>src/func/generation_promptsmiles_func.py</code> にする。</li>
+          <li>引数は生成本体の <code>parse_args</code> と<strong>同じもの</strong>を受け取り、
+            そのまま子プロセスに渡す。現在の PromptSMILES の引数構成に合わせること
+            （<code>--frag_method</code>, <code>--model_ver</code>, <code>--gen_method</code>,
+            <code>--additional_path</code>, <code>--n_samples</code>, <code>--max_length</code>,
+            <code>--num_beams</code>, <code>--random_seed</code> など。実際の
+            <code>parse_args</code> を読んで漏れなく渡すこと）。</li>
+          <li><code>output_dir</code> は
+            <code>f'{BASEPATH}/results/promptsmiles/gpt/{model_ver}/{frag_method}/{args.gen_method}/{args.additional_path}'</code>。
+            <strong>生成本体が計算するものと完全に一致させること。</strong></li>
+          <li><code>model_path</code> は
+            <code>f'{BASEPATH}/models/promptsmiles/gpt/{model_ver}/{frag_method}/best_model'</code>。</li>
+          <li><code>run_and_record_time</code> に渡す <code>params</code> は
+            <code>gen_fraggpt.py:57-67</code> と同じキー構成にする。PromptSMILES に無いキー
+            （<code>batch_size</code> など）は生成本体の引数に合わせて調整すること。</li>
+          <li><strong><code>os.environ["CUDA_LAUNCH_BLOCKING"] = "1"</code> は付けない。</strong>
+            これは FragGPT の GPU beam クラッシュを回避するための措置で、PromptSMILES では
+            その問題が確認されていない。付けると生成が遅くなり、その時間が計測に入る。</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 1 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="3">
+      <li>
+        <h3>Step 3: <code>gen_promptsmiles.sh</code> を確認する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_mols/gen_promptsmiles.sh</code></p>
+        <ul>
+          <li>呼び出し先は <code>${SCRIPT_DIR}/gen_promptsmiles.py</code> のままで変わらない
+            （ラッパが同じパスに置かれるため）。</li>
+          <li>生成本体に <code>--additional_path</code> が増えたので、<code>.sh</code> から渡す
+            必要があるか確認する。他の <code>gen_*.sh</code> に倣い、
+            <strong>渡さない（既定の <code>normal</code> を使う）</strong>なら変更不要。</li>
+          <li><code>conda activate promptsmiles</code> と <code>CUDA_VISIBLE_DEVICES</code> は
+            同日の別計画で追加済み。重複させないこと。</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 2 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="4">
+      <li>
+        <h3>Step 4: README の記述を更新する</h3>
+        <p><strong>対象ファイル:</strong> <code>README.md</code>, <code>README_ja.md</code></p>
+        <ul>
+          <li>生成セクションの PromptSMILES の説明に、他手法と同じく
+            <code>generation_time.json</code> が出力される旨が読み取れる状態にする。
+            ただし<strong>手法ごとに個別の注記を増やさないこと</strong> — 現在の記述で
+            「4手法とも同じ形式で出力する」と読めるなら追加は不要。実際の文面を読んで判断すること。</li>
+          <li>生成本体のパスに言及している箇所があれば
+            <code>src/func/generation_promptsmiles_func.py</code> に直す。</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 2 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="5">
+      <li>
+        <h3>Step 5: 検証（メインエージェントが実施）</h3>
+        <p><strong>対象ファイル:</strong> 実行のみ（コード変更なし）</p>
+        <ul>
+          <li>構文チェックと import 確認（<strong><code>joblib</code> 未導入のため import は
+            失敗する見込み。その場合は <code>joblib</code> を一時的に stub して確認すること</strong>）</li>
+          <li><code>gen_promptsmiles.py --help</code> と
+            <code>generation_promptsmiles_func.py --help</code> の引数が一致すること</li>
+          <li><strong>ラッパと生成本体が計算する <code>output_dir</code> が完全に一致すること</strong>
+            （<code>--additional_path</code> を <code>normal</code> 以外にしても一致すること）</li>
+          <li><code>run_and_record_time</code> に渡す <code>params</code> のキーが他手法の
+            <code>generation_time.json</code> と揃っていること</li>
+          <li><strong>生成ロジックが移動前と同一であること</strong>
+            （<code>git show HEAD:src/gen_mols/gen_promptsmiles.py</code> と新ファイルを、
+            docstring・<code>main()</code> 切り出し・<code>--additional_path</code> 追加を除いて
+            差分比較）</li>
+          <li>実モデルで少数行を生成し、<code>predictions.csv</code> と
+            <code>generation_time.json</code> の両方が書かれること（<code>joblib</code> 導入後に実施。
+            <strong>未導入なら「未検証」と明記して報告すること</strong>）</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 4 の後</p>
+      </li>
+    </article>
+  </ol>
+</section>
+</body>
+</html>

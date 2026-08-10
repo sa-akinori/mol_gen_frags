@@ -54,8 +54,8 @@ pip install -e .
 | PromptSMILES | plain SMILES + inference-time prompting | `entropy/gpt2_zinc_87m` | `promptsmiles` |
 | FragGPT | FU-SMILES (BRICS fragments with paired `[i*]` labels) | `entropy/gpt2_zinc_87m` | `fraggpt` |
 
-The `run_*.sh` and `gen_fraggpt.sh` scripts activate their environment themselves, so they can be
-launched from any shell.
+Every `run_*.sh` and `gen_*.sh` script activates its own environment, so they can be launched from
+any shell. The `python src/...` commands below have to be run in the environment shown next to them.
 
 ## Modifications to Virtual Environments
 ## T5Chem
@@ -176,7 +176,6 @@ same row order, so the methods can be compared row by row.
 ### Model Training
 ```bash
 # 1. Train the RFFMG model (T5Chem or GPT2)
-$ conda activate t5chem
 $ bash src/train_model/run_rffmg.sh
 # Set MODEL_NAME/MODE/FRAG_NAME inside the .sh.
 #   MODEL_NAME="t5chem": T5Chem (runs `t5chem train`).
@@ -184,7 +183,6 @@ $ bash src/train_model/run_rffmg.sh
 #                        entropy/gpt2_zinc_87m; MODE="from_scratch" uses the same config with random weights.
 
 # 2. Fine-tune SAFE-GPT
-$ conda activate safe
 $ bash src/train_model/run_safe.sh
 # Due to the large number of arguments, they are specified in the .sh file.
 # Adjust the rc_cms part and output_dir in the .sh file as needed. Use --pretrain '' for training without a pre-trained model.
@@ -192,7 +190,7 @@ $ bash src/train_model/run_safe.sh
 
 # 3. Train the PromptSMILES prior (plain-SMILES language model)
 $ bash src/train_model/run_promptsmiles.sh
-# The .sh activates env_promptsmiles itself. Set FRAG_NAME/MODE at the top of the .sh.
+# Set FRAG_NAME/MODE at the top of the .sh.
 # The prior is an unconditional SMILES language model; PromptSMILES supplies its prompt only at
 # inference time. Each molecule is always rewritten from a random root atom, because the prompts
 # seen at inference are non-canonical and start at an arbitrary atom. No augmentation is applied
@@ -200,10 +198,9 @@ $ bash src/train_model/run_promptsmiles.sh
 
 # 4. Train FragGPT (FU-SMILES language model)
 $ bash src/train_model/run_fraggpt.sh
-# The .sh activates env_fraggpt itself. Set FRAG_NAME/MODE at the top of the .sh.
+# Set FRAG_NAME/MODE at the top of the .sh.
 # The model is an unconditional FU-SMILES language model. The attachment labels are relabeled by a
-# random permutation and the fragments are shuffled (on by default; --no-augment disables it), which
-# does not change the number of sequences.
+# random permutation and the fragments are shuffled, which does not change the number of sequences.
 ```
 
 `MODE="finetuning"` starts from `entropy/gpt2_zinc_87m`; `MODE="from_scratch"` uses the same config
@@ -220,22 +217,22 @@ evaluation pipeline reads them unchanged.
 
 ```bash
 # RFFMG (T5Chem or GPT2; set MODEL_NAME inside the .sh)
-$ conda activate t5chem
 $ bash src/gen_mols/gen_rffmg.sh
 
 # SAFE-GPT
-$ conda activate safe
 $ bash src/gen_mols/gen_safe.sh
 
 # PromptSMILES (scaffold decoration / fragment linking, chosen per row)
-$ conda activate env_promptsmiles
 $ bash src/gen_mols/gen_promptsmiles.sh
 # Set FRAG_NAME/MODEL_VER/GEN_METHOD at the top of the .sh.
 # GEN_METHOD="beam" matches RFFMG and SAFE; "sampling" is the multinomial scheme of the paper.
+# The `sampler` column of predictions.csv records which of the two a row went through.
+# A fragment set PromptSMILES cannot express is not generated at all; the row is kept as
+# `unsupported` with INVALID_SMILES predictions.
 
 # FragGPT
 $ bash src/gen_mols/gen_fraggpt.sh
-# The .sh activates env_fraggpt itself. Set FRAG_NAME/MODEL_VER at the top of the .sh.
+# Set FRAG_NAME/MODEL_VER at the top of the .sh.
 # Each attachment point of the prompted fragment set is given a fresh label, the model completes the
 # FU-SMILES string, and the fragments are reassembled by matching the [i*] labels.
 ```
@@ -245,12 +242,32 @@ Results are written to `results/{repr}/{model}/{model_ver}/{frag}/{gen_method}/{
 ### Evaluation of Generated Molecules
 ```bash
 $ conda activate safe
-$ python src/evaluation.py --model_name t5chem --model_ver finetuning --frag_method rc_cms --additional_path normal
-# --model_name: t5chem / gpt (RFFMG-GPT) / safe_gpt / promptsmiles / fraggpt
+$ python src/evaluation.py --repr_name rffmg --model_name gpt --model_ver finetuning --frag_method rc_cms --additional_path normal
+# --repr_name:  rffmg / safe / promptsmiles / fraggpt (fragment representation, first path segment)
+# --model_name: t5chem / gpt (model the representation was trained with, second path segment)
 # --gen_method: beam / sampling (defaults to beam, except promptsmiles which defaults to sampling)
 ```
 
+Valid `--repr_name` / `--model_name` combinations (any other pair is rejected by the parser):
+
+| `--repr_name` | `--model_name` | results path |
+|---------------|----------------|--------------|
+| rffmg         | t5chem         | `results/rffmg/t5chem/` |
+| rffmg         | gpt            | `results/rffmg/gpt/` |
+| safe          | gpt            | `results/safe/gpt/` |
+| promptsmiles  | gpt            | `results/promptsmiles/gpt/` |
+| fraggpt       | gpt            | `results/fraggpt/gpt/` |
+
 Run the generation step first: the evaluation joins `test.source` and `predictions.csv` by row
 number, and PromptSMILES and FragGPT write their `test.source` / `test.target` at generation time.
+
+The `stats.csv` written by `src/evaluation.py` covers every test row, and all four methods are
+asked for the same fragment set. PromptSMILES generates nothing for a fragment set it cannot
+express, and those rows are scored as `INVALID_SMILES`, exactly like a FragGPT assembly failure or
+a SAFE decoding failure, so the numbers include coverage.
+
+Which rows were left ungenerated is recorded in the `sampler` column of `predictions.csv`
+(`scaffold` / `linking` / `unsupported` / `invalid_target` / `generation_error`); the counts per
+reason are written to `generation_params.txt`.
 
 If you need the curated ChEMBL dataset used in this study, please feel free to contact us at [sato.akinori@naist.ac.jp] or [miyao@dsc.naist.jp].

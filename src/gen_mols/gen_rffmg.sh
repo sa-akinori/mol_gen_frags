@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+export CUDA_VISIBLE_DEVICES=0
+
+# conda setup
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate t5chem
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 MODEL_NAME="gpt" # "t5chem" or "gpt"

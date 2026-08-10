@@ -6,3 +6,4 @@ transformers==4.45.2
 datasets==4.8.2
 pandas==3.0.1
 wandb==0.25.1
+joblib==1.5.3

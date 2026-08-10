@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Plan: fix_evaluation_paths (2026-08-06)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; }
+  h1 { border-bottom: 2px solid #333; }
+  .step { margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; font-size: 0.92em; }
+  th, td { border: 1px solid #ddd; padding: 0.4em 0.6em; text-align: left; }
+  th { background: #f4f4f4; }
+  .ng { color: #b00; font-weight: bold; }
+  .ok { color: #070; font-weight: bold; }
+  .rev { background: #fff8e1; border-left: 4px solid #f0ad4e; padding: 0.6em 1em; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plan: fix_evaluation_paths</h1>
+  <p class="meta">Date: 2026-08-06 | Status: completed (rev.2, 2026-08-06 実装・検証済み)</p>
+  <p class="rev">rev.2: ユーザー指示により <strong>Step 1 の既定値を 5 に変更</strong>、
+  <strong>Step 4 を「gen_safe.py 側に normal を追加」に変更</strong>、
+  <strong>旧 Step 5 (promptsmiles/fraggpt の additional_path 固定) を削除</strong>。</p>
+</header>
+
+<section id="overview">
+  <h2>概要</h2>
+  <p><code>src/evaluation.py</code> が組み立てるデータパス・結果パスが、生成側スクリプトの実際の出力先とずれており、
+  現状では <code>t5chem</code> / <code>gpt</code> / <code>safe_gpt</code> の評価がファイル未検出で失敗する。</p>
+
+  <p>本計画で、4 表現 5 モデル (<code>t5chem</code>, <code>gpt</code>, <code>safe_gpt</code>,
+  <code>promptsmiles</code>, <code>fraggpt</code>) すべてが同じ <code>evaluation.py</code> で評価できる状態にする。
+  あわせて、手法ごとに異なる余分な列 (<code>prompt_safe</code> / <code>sampler</code>) を評価パイプラインに
+  持ち込まないよう <code>loadGenSmiles</code> の戻り値を正規化する。</p>
+
+  <h3>調査で確定した不整合 — 結果パス</h3>
+  <table>
+    <tr><th>model_name</th><th>生成側の出力先</th><th>evaluation.py が読む場所</th><th>判定</th></tr>
+    <tr><td>t5chem / gpt</td><td><code>results/rffmg/{m}/{ver}/{frag}/{N}times_sampling/{gen}/{add}/</code></td><td><code>results/rffmg/{m}/{ver}/{frag}/{gen}/{add}/</code></td><td class="ng">NG: {N}times_sampling 欠落</td></tr>
+    <tr><td>safe_gpt</td><td><code>results/safe/gpt/{ver}/{frag}/beam/</code></td><td><code>results/safe/gpt/{ver}/{frag}/beam/normal/</code></td><td class="ng">NG: 生成側に normal がない</td></tr>
+    <tr><td>promptsmiles</td><td><code>results/promptsmiles/gpt/{ver}/{frag}/{gen}/normal/</code></td><td>同左</td><td class="ok">OK</td></tr>
+    <tr><td>fraggpt</td><td><code>results/fraggpt/gpt/{ver}/{frag}/{gen}/normal/</code></td><td>同左</td><td class="ok">OK</td></tr>
+  </table>
+
+  <h3>調査で確定した不整合 — データパス</h3>
+  <table>
+    <tr><th>用途</th><th>実在するパス</th><th>evaluation.py が読む場所</th><th>判定</th></tr>
+    <tr><td>t5chem/gpt 学習分子</td><td><code>data/rffmg/{frag}/{N}times_sampling/normal/train.target</code></td><td><code>data/rffmg/{frag}/normal/train.target</code></td><td class="ng">NG</td></tr>
+    <tr><td>t5chem/gpt テスト入力</td><td><code>data/rffmg/{frag}/{N}times_sampling/{add}/test.source</code></td><td><code>data/rffmg/{frag}/{add}/test.source</code></td><td class="ng">NG</td></tr>
+    <tr><td>frag_order の id</td><td><code>data/rffmg/{frag}/{N}times_sampling/frag_order/random_get_ids.pkl</code></td><td><code>data/rffmg/{frag}/frag_order/random_get_ids.pkl</code></td><td class="ng">NG</td></tr>
+    <tr><td>promptsmiles / fraggpt</td><td><code>data/{m}/{frag}/normal/</code></td><td>同左</td><td class="ok">OK</td></tr>
+  </table>
+
+  <h3>predictions.csv の列</h3>
+  <table>
+    <tr><th>手法</th><th>列</th><th>評価に使う列</th></tr>
+    <tr><td>t5chem / gpt / fraggpt</td><td><code>target</code>, <code>prediction_1..N</code></td><td><code>fragment</code>(test.source 由来), <code>target</code>, <code>prediction_*</code></td></tr>
+    <tr><td>safe_gpt</td><td><code>(index)</code>, <code>target</code>, <code>prompt_safe</code>, <code>fragment</code>, <code>prediction_1..N</code></td><td>同上 (<code>prompt_safe</code> は不要)</td></tr>
+    <tr><td>promptsmiles</td><td><code>target</code>, <code>sampler</code>, <code>prediction_1..N</code></td><td>同上 (<code>sampler</code> は不要)</td></tr>
+  </table>
+  <p><code>evaluation_func()</code> は <code>fragment</code> / <code>target</code> / <code>all_smiles</code> しか参照しないため
+  計算結果には影響しないが、<code>sc3_check_genmol_results</code> が書き出す <code>curated_data.tsv</code> /
+  <code>gen_samples_visualize.tsv</code> に余分な列が混ざる。</p>
+
+  <h3>設計判断 (rev.2 でユーザーが決定)</h3>
+  <ul>
+    <li><strong>safe_gpt は生成側に <code>normal</code> を追加する。</strong>
+      <code>evaluation.py</code> の <code>results/safe/gpt/{ver}/{frag}/{gen}/{additional_path}</code> という組み立ては
+      他手法と揃っており正しいので変えず、<code>gen_safe.py</code> / <code>generation_safe_func.py</code> の出力先に
+      <code>normal</code> を足して階層を揃える。既存の
+      <code>results/safe/gpt/finetuning/brics/beam/predictions.csv</code> は不要 (SAFE は再生成する)。</li>
+    <li><strong>promptsmiles / fraggpt の <code>additional_path</code> は固定しない。</strong>渡された値をそのままパスに使う。</li>
+    <li><code>--sampling_num</code> の既定値は <strong>5</strong> (<code>data/</code> にも <code>results/</code> にも
+      5times_sampling が揃っているため)。<code>gen_rffmg.py</code> の既定値は 10 だが、評価側は 5 を既定とする。</li>
+  </ul>
+</section>
+
+<section id="plan">
+  <h2>実装計画</h2>
+  <ol>
+    <article class="step" data-step="1">
+      <li>
+        <h3>Step 1: <code>--sampling_num</code> 引数の追加</h3>
+        <p><strong>対象ファイル:</strong> <code>src/evaluation.py</code></p>
+        <p><strong>変更内容:</strong> 引数定義ブロックに <code>--sampling_num</code> を追加する
+        (<code>type=int, default=5, choices=[5, 10]</code>、help に
+        <code>data/rffmg/&lt;frag&gt;/&lt;N&gt;times_sampling</code> を明記)。RFFMG (<code>t5chem</code> /
+        <code>gpt</code>) 以外では使わない旨を help に書く。</p>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="2">
+      <li>
+        <h3>Step 2: <code>--model_name</code> の既定値を help に合わせる</h3>
+        <p><strong>対象ファイル:</strong> <code>src/evaluation.py</code></p>
+        <p><strong>変更内容:</strong> <code>--model_name</code> に <code>default='t5chem'</code> を付ける。
+        現状 help は <code>(default: t5chem)</code> と書いてあるが argparse に default がなく、省略時は
+        <code>None</code> が最後の <code>else</code> 分岐に落ちて偶然 t5chem として動いている。</p>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="3">
+      <li>
+        <h3>Step 3: RFFMG のデータ・結果パスに <code>{N}times_sampling</code> を挿入</h3>
+        <p><strong>対象ファイル:</strong> <code>src/evaluation.py</code></p>
+        <p><strong>変更内容:</strong></p>
+        <ul>
+          <li><code>sampling = f'{args.sampling_num}times_sampling'</code> を用意する。</li>
+          <li><code>t5chem</code> / <code>gpt</code> 分岐の <code>tr_file_name</code> を
+            <code>data/rffmg/{frag_method}/{sampling}/normal/train.target</code> に、<code>testInputfile</code> を
+            <code>data/rffmg/{frag_method}/{sampling}/{additional_path}/test.source</code> に変更。</li>
+          <li><code>outfd</code> を手法ごとに組み立てる。RFFMG のときだけ <code>{frag_method}</code> と
+            <code>{gen_method}</code> の間に <code>{sampling}</code> を挟む。他の手法は現行どおり
+            <code>results/{str_name}/{model_dir}/{model_ver}/{frag_method}/{gen_method}/{additional_path}</code>。</li>
+          <li><code>frag_order</code> ブロック (現 <code>evaluation.py:102-107</code>) の <code>outfd</code> と
+            <code>datafd</code> にも同じく <code>{sampling}</code> を挟む。<code>datafd</code> は
+            <code>data/{str_name}/{frag_method}/</code> というハードコードだが、frag_order は RFFMG 専用条件なので
+            <code>data/rffmg/{frag_method}/{sampling}/</code> に固定する。</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 1 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="4">
+      <li>
+        <h3>Step 4: SAFE 生成の出力先に <code>normal</code> を追加</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_mols/gen_safe.py</code>, <code>src/func/generation_safe_func.py</code></p>
+        <p><strong>変更内容:</strong> 両ファイルの <code>output_dir</code> (<code>gen_safe.py:24,28</code> と
+        <code>generation_safe_func.py:106,110</code>) の末尾に <code>normal</code> を追加し、
+        <code>results/safe/gpt/{model_ver}/{frag_method}/beam/normal/</code> に出力するようにする。
+        <code>generation_safe_func.py</code> の冒頭 docstring の「出力」記述も新パスに更新する。
+        これで <code>evaluation.py</code> 側は safe_gpt について変更不要になる
+        (現行の <code>additional_path='normal'</code> 強制のまま一致する)。既存の
+        <code>results/safe/gpt/finetuning/brics/beam/predictions.csv</code> は旧パスに残るが、不要なので触らない
+        (SAFE は再生成する)。<code>generation_safe_func_old.py</code> は参照用の旧版なので変更しない。</p>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="5">
+      <li>
+        <h3>Step 5: <code>loadGenSmiles</code> の戻り値を評価に使う列だけに正規化</h3>
+        <p><strong>対象ファイル:</strong> <code>src/func/evaluation_func.py</code></p>
+        <p><strong>変更内容:</strong> <code>loadGenSmiles</code> (現 <code>evaluation_func.py:56-73</code>) の末尾で、
+        返す DataFrame を <code>['fragment', 'target'] + [prediction_* 列]</code> に絞る。これにより
+        <code>safe_gpt</code> の <code>prompt_safe</code> と <code>promptsmiles</code> の <code>sampler</code> が
+        下流に流れなくなり、全手法で同一列構成になる。docstring (Google style) を追加し、返す列名を明記する。
+        <code>safe_gpt</code> 分岐の time_out/error 行フィルタは列を絞る前に実行する
+        (フィルタが prediction 列を見るため)。</p>
+        <p><strong>依存関係:</strong> なし (Step 1-4 と独立)</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="6">
+      <li>
+        <h3>Step 6: パス解決の検証</h3>
+        <p><strong>対象ファイル:</strong> なし (検証のみ)</p>
+        <p><strong>変更内容:</strong> 各 <code>model_name</code> について、<code>evaluation.py</code> が組み立てる
+        <code>tr_file_name</code> / <code>testInputfile</code> / <code>outfd</code> が実在するファイルを指すことを確認する。
+        重い評価本体は回さず、パス組み立て部分だけを切り出して <code>os.path.exists</code> で確認する。</p>
+        <ul>
+          <li><code>t5chem</code> / <code>gpt</code>: <code>--frag_method brics --sampling_num 5 --model_ver finetuning</code> で
+            <code>results/rffmg/{m}/finetuning/brics/5times_sampling/beam/normal/predictions.csv</code> に解決されること。</li>
+          <li><code>safe_gpt</code> / <code>promptsmiles</code> / <code>fraggpt</code>: 生成物が新パスに未作成のため、
+            組み立てたパス文字列が生成側スクリプトの出力先と文字列として一致することを確認する。</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 5 の後</p>
+      </li>
+    </article>
+  </ol>
+</section>
+
+<section id="notes">
+  <h2>実装対象外・報告のみ</h2>
+  <ul>
+    <li>Step 4 により SAFE の生成結果は新パスに出るため、SAFE の再生成が必要。</li>
+    <li><code>results/train_physic_property.csv</code> は最初の評価実行時にキャッシュされ、以降どの
+      <code>model_name</code> / <code>frag_method</code> でも再利用される。学習分子集合は 4 手法で共通なので
+      手法間では問題ないが、<code>brics</code> と <code>rc_cms</code> をまたいでも再利用される点は留意が必要。今回は変更しない。</li>
+    <li><code>promptsmiles</code> の <code>default_gen_method</code> は <code>sampling</code> だが
+      <code>gen_promptsmiles.sh</code> の既定は <code>beam</code>。<code>--gen_method</code> で明示すれば済むため今回は変更しない。</li>
+  </ul>
+</section>
+</body>
+</html>

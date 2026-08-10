@@ -9,13 +9,16 @@
 これは RFFMG / FragGPT / PromptSMILES がプロンプトに使うフラグメント集合と同一であり、
 テスト分子を再フラグメント化することはしない。
 
-出力（``results/safe/gpt/{model_ver}/{frag_method}/beam/`` 配下）:
-    - ``predictions.csv``: 列は ``target`` / ``prompt_safe`` / ``fragment`` /
-      ``prediction_1`` .. ``prediction_N``。
-    - ``error_logs.csv``: 生成に失敗したバッチの行を理由つきで記録する。
+出力（``results/safe/gpt/{model_ver}/{frag_method}/beam/normal/`` 配下）:
+    - ``predictions.csv``: 列は ``fragment``（プロンプトしたフラグメント集合） / ``target`` /
+      ``prompt_safe`` / ``prediction_1`` .. ``prediction_N``。行番号による外部ファイルとの
+      結合を必要としないよう、プロンプトを自分で ``fragment`` 列に書く。他手法と揃えて
+      index は書き出さない。
 
-バッチ単位で例外を捕捉し、失敗した行も ``error`` を埋めて表に残すため、predictions.csv は
-常にテスト分割と同じ行数・同じ順序になる。
+生成中の例外は握り潰さずそのまま送出する。設定ミスや CUDA OOM を埋め文字で覆い隠して
+成功したように見える predictions.csv を書くより、落ちてやり直す方がよいためである。
+デコードに失敗した候補だけが ``INVALID_SMILES`` になり、predictions.csv は常にテスト分割と
+同じ行数・同じ順序になる。
 """
 
 import argparse
@@ -31,7 +34,7 @@ from tqdm import tqdm
 from transformers import PreTrainedTokenizerBase
 
 from func.evaluation_func import Smi2CanSmi
-from func.utility import BASEPATH
+from func.utility import BASEPATH, INVALID_SMILES
 
 def decode_safe_smiles(seq: str) -> str | None:
     """生成されたSAFE文字列を正準SMILESに戻す。
@@ -103,11 +106,11 @@ if __name__ == "__main__":
 
     if args.model_ver == 'pretrained':
         model_path = f'{BASEPATH}/models/safe/gpt/pretrained/'
-        output_dir = f'{BASEPATH}/results/safe/gpt/pretrained/{args.frag_method}/beam/'
+        output_dir = f'{BASEPATH}/results/safe/gpt/pretrained/{args.frag_method}/beam/normal/'
 
     else:  # finetuning / from_scratch
         model_path = f'{BASEPATH}/models/safe/gpt/{args.model_ver}/{args.frag_method}/best_model'
-        output_dir = f'{BASEPATH}/results/safe/gpt/{args.model_ver}/{args.frag_method}/beam/'
+        output_dir = f'{BASEPATH}/results/safe/gpt/{args.model_ver}/{args.frag_method}/beam/normal/'
 
     model     = SAFEDoubleHeadsModel.from_pretrained(model_path)
     tokenizer = SAFETokenizer.from_pretrained(model_path).get_pretrained()
@@ -131,43 +134,31 @@ if __name__ == "__main__":
 
     generated_safe = []
     prompts = []
-    error_logs = []
     for start in tqdm(range(0, len(test_df), args.batch_size), desc='prediction'):
         batch_df = test_df.iloc[start:start + args.batch_size]
 
-        try:
-            prefixes = [encoder.encoder(f, canonical=True, randomize=False, constraints=None, allow_empty=True) for f in batch_df['pass_fragments']]
-            input_ids, attention_mask = encode_prefixes(prefixes, tokenizer, device)
-            with torch.no_grad():
-                outputs = model.generate(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    do_sample=False,
-                    num_beams=args.num_beams,
-                    num_return_sequences=args.n_samples,
-                    max_length=args.max_length,
-                    early_stopping=True,
-                    pad_token_id=tokenizer.pad_token_id,
-                    eos_token_id=tokenizer.eos_token_id,
-                )
-
-            decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)
-            prompts.extend(prefixes)
-            generated_safe.extend([decoded[i * args.n_samples:(i + 1) * args.n_samples] for i in range(len(prefixes))])
-
-        except Exception as error:
-            prompts.extend(["error"] * len(batch_df))
-            generated_safe.extend([["error"] * args.n_samples for _ in range(len(batch_df))])
-            error_logs.extend(
-                [row_index, target, fragments, type(error).__name__, str(error)]
-                for row_index, target, fragments
-                in zip(batch_df.index, batch_df['smiles'], batch_df['pass_fragments'])
+        prefixes = [encoder.encoder(f, canonical=True, randomize=False, constraints=None, allow_empty=True) for f in batch_df['pass_fragments']]
+        input_ids, attention_mask = encode_prefixes(prefixes, tokenizer, device)
+        with torch.no_grad():
+            outputs = model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                do_sample=False,
+                num_beams=args.num_beams,
+                num_return_sequences=args.n_samples,
+                max_length=args.max_length,
+                early_stopping=True,
+                pad_token_id=tokenizer.pad_token_id,
+                eos_token_id=tokenizer.eos_token_id,
             )
 
+        decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+        prompts.extend(prefixes)
+        generated_safe.extend([decoded[i * args.n_samples:(i + 1) * args.n_samples] for i in range(len(prefixes))])
 
-    base_df = pd.DataFrame({'target': test_df['smiles'], 'prompt_safe': prompts, 'fragment': test_df['pass_fragments']}, index=test_df.index)
+    base_df = pd.DataFrame({'fragment': test_df['pass_fragments'], 'target': test_df['smiles'], 'prompt_safe': prompts}, index=test_df.index)
     smiles_df = pd.DataFrame(
-        [[decode_safe_smiles(seq) or 'safe_invalid' for seq in seqs] for seqs in generated_safe],
+        [[decode_safe_smiles(seq) or INVALID_SMILES for seq in seqs] for seqs in generated_safe],
         columns=[f'prediction_{i + 1}' for i in range(args.n_samples)],
         index=test_df.index,
     )
@@ -175,10 +166,7 @@ if __name__ == "__main__":
 
     os.makedirs(output_dir, exist_ok=True)
     predictions_path = f'{output_dir}/predictions.csv'
-    predictions_df.to_csv(predictions_path)
+    predictions_df.to_csv(predictions_path, index=False)
 
-    error_path = f'{output_dir}/error_logs.csv'
-    error_df = pd.DataFrame(error_logs, columns=['row_index', 'target', 'pass_fragments', 'error_type', 'error_message'])
-    error_df.to_csv(error_path, index=False)
     print(f"Saved SMILES predictions to: {predictions_path}")
     print("Generation completed!")

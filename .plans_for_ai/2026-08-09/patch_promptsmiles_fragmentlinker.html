@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Plan: promptsmiles の FragmentLinker のバグを修正する (2026-08-09)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; }
+  h1 { border-bottom: 2px solid #333; }
+  h2 { border-bottom: 1px solid #ccc; margin-top: 2em; }
+  .step { margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+  pre { background: #f4f4f4; padding: 0.8em; border-radius: 4px; overflow-x: auto; }
+  table { border-collapse: collapse; margin: 1em 0; width: 100%; }
+  th, td { border: 1px solid #ddd; padding: 0.4em 0.7em; text-align: left; font-size: 0.95em; }
+  th { background: #f4f4f4; }
+  .warn { background: #fff3f3; border-left: 4px solid #d9534f; padding: 0.8em 1em; margin: 1em 0; }
+  .note { background: #eef6ff; border-left: 4px solid #4a90d9; padding: 0.8em 1em; margin: 1em 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plan: promptsmiles の FragmentLinker のバグを修正する</h1>
+  <p class="meta">Date: 2026-08-09 | Status: approved</p>
+</header>
+
+<section id="overview">
+  <h2>概要</h2>
+  <div class="warn">
+    <p>外部ライブラリ <code>promptsmiles</code> の <code>FragmentLinker._batch_sample</code> に、
+    <strong>指定した断片が最終分子から抜け落ちるバグ</strong>がある。
+    <code>gen_promptsmiles.py</code> は <code>batch_prompts=True</code> でこのコードパスを通るため、
+    生成結果が直接影響を受ける。</p>
+  </div>
+
+  <h3>FragmentLinker の処理</h3>
+  <p>複数の断片 A・B・C をつなぐとき、断片を1つずつ順にプロンプトへ足していく。</p>
+  <pre><code>1. 断片A をプロンプトにして生成
+2. 次は断片B。その前に「モデルがもう B に相当する構造を作っていないか」を確認する
+   - 作っていれば B をプロンプトに入れない（スキップ）
+   - 作っていなければ B をプロンプトに足して続きを生成
+3. 断片C も同様</code></pre>
+  <p>この確認では、生成分子の中で B と一致した部分構造が <strong>本当に新しく作られた B</strong> なのか、
+  <strong>すでに置いた断片A の一部を誤認しているだけ</strong> なのかを区別する必要がある。
+  そのために「その原子はすでに断片として計上済みか」を調べている。</p>
+
+  <h3>バグの内容</h3>
+  <p><code>_single_sample</code>（単一プロンプト経路）では <code>frag_indexes</code> が整数のフラットなリスト。</p>
+  <pre><code>frag_indexes = list(range(len(prompt_tokens)))                      # samplers.py:621
+if not any([atom_map[aidx] in frag_indexes for aidx in match]):     # :649, :701  正しい</code></pre>
+  <p><code>_batch_sample</code>（バッチ経路）では <strong>行ごとのリストのリスト</strong>になる。</p>
+  <pre><code>frag_indexes = []                                                   # samplers.py:747
+frag_indexes.append(list(range(len(f0_tokens))))                    # :756
+if not any([atom_map[aidx] in frag_indexes for aidx in match]):     # :796, :865  バグ</code></pre>
+  <p>整数をリストのリストから探すため <code>in</code> は<strong>必ず False</strong>、
+  <code>not any(...)</code> は<strong>常に True</strong>。「計上済みの原子は1つも無い」と常に判定される。</p>
+  <pre><code>2 in [[0,1,2],[3,4]]     -&gt; False    バッチ版が書いている比較
+2 in [[0,1,2],[3,4]][0]  -&gt; True     本来やるべき比較</code></pre>
+  <p>同じ関数の <code>:818</code> では正しく <code>existing_indexes</code>（<code>zip</code> で
+  取り出した行ごとのリスト）を使っており、書き間違いと見られる。</p>
+
+  <h3>何が起きるか</h3>
+  <p><strong>すでに置いた断片を「新しく生成された断片」と誤認し、本来プロンプトに入れるべき断片を
+  スキップする。</strong> 結果、指定した断片が最終分子に含まれない。</p>
+  <p>例: 断片が「ベンゼン環A」「ベンゼン環B」「リンカーC」のとき、A を置いた後に B を探すと
+  A のベンゼン環がヒットする。正しくは「その原子は A として計上済み → B はまだ無い」と判定して
+  B をプロンプトに足すべきだが、常に「B はもうある」と判定してスキップしてしまう。
+  ベンゼン環が1つしかない分子ができる。</p>
+  <p>評価では <code>validfragratio</code>（断片をすべて含むか）に効く。</p>
+
+  <h3>影響範囲（実測）</h3>
+  <p><code>detect_existing=True</code> かつ <code>batch_prompts=True</code> の経路のみ。
+  この分岐は2断片目以降で回るので、3断片以上の linking に効く。</p>
+  <pre><code>brics test 82,441行のうち
+  3断片以上の linking 行     : 528
+    完全に同じ断片を含む行   : 197   ← 最も踏みやすい
+    一方が他方の部分構造の行 :  69</code></pre>
+
+  <h3>修正箇所</h3>
+  <p><code>FragmentLinker._batch_sample</code> の2箇所。<code>_single_sample</code> の2箇所
+  （<code>:649</code>, <code>:701</code>）は正しいので<strong>触らない</strong>。</p>
+  <table>
+    <tr><th>行</th><th>分岐</th><th>囲むループ</th><th>直し方</th></tr>
+    <tr><td>796</td><td><code>optimize_prompts=True</code> 側</td>
+      <td><code>for bi, (smiles, fragments, existing_indexes) in enumerate(zip(..., frag_indexes))</code></td>
+      <td><code>frag_indexes</code> → <code>existing_indexes</code></td></tr>
+    <tr><td>865</td><td><code>optimize_prompts=False</code> 側（<code>else:</code>）</td>
+      <td><code>for bi, (smiles, fragments) in enumerate(zip(batch_smiles[0], batch_fragments))</code>
+        — <code>existing_indexes</code> を取っていない</td>
+      <td><code>frag_indexes</code> → <code>frag_indexes[bi]</code></td></tr>
+  </table>
+
+  <h3>前例</h3>
+  <p>SAFE でも同じく site-packages に手を入れており、<code>README.md:77-112</code> /
+  <code>README_ja.md:75-110</code> にパッチ一覧が記載されている。同じ形で PromptSMILES の項を足す。</p>
+
+  <h3>環境</h3>
+  <div class="note">
+    <p><code>import promptsmiles</code> が解決するのは
+    <code>/home/sato/miniconda3/envs/promptsmiles/lib/python3.12/site-packages/promptsmiles</code>。
+    <code>lib/python3.1</code> は <code>python3.12</code> へのシンボリックリンクなので
+    <strong>実体は1つ</strong>。</p>
+  </div>
+
+  <h2>スコープ外</h2>
+  <ul>
+    <li><code>promptsmiles</code> の他のバグ調査</li>
+    <li>生成のやり直し（修正後に改めて判断する）</li>
+  </ul>
+</section>
+
+<section id="plan">
+  <h2>実装計画</h2>
+  <ol>
+    <article class="step" data-step="1">
+      <li>
+        <h3>Step 1: README にパッチ内容を追記する</h3>
+        <p><strong>対象ファイル:</strong> <code>README.md</code>, <code>README_ja.md</code></p>
+        <ul>
+          <li>「Modifications to Virtual Environments」/「仮想環境の変更点」の節に、
+            SAFE / T5Chem と同じ体裁で <strong>PromptSMILES</strong> の項を追加する。</li>
+          <li>内容は <code>promptsmiles/samplers.py</code> の2箇所。既存の項と同じく
+            「変更前をコメントアウトし、変更後を示す」形式で書くこと。
+            <pre><code># Error in promptsmiles/samplers.py (FragmentLinker._batch_sample, line 796)
+# if not any([atom_map[aidx] in frag_indexes for aidx in match]):
+if not any([atom_map[aidx] in existing_indexes for aidx in match]):
+
+# Error in promptsmiles/samplers.py (FragmentLinker._batch_sample, line 865)
+# if not any([atom_map[aidx] in frag_indexes for aidx in match]):
+if not any([atom_map[aidx] in frag_indexes[bi] for aidx in match]):</code></pre></li>
+          <li><strong>なぜ必要かを1〜2行で添えること</strong>（<code>_batch_sample</code> では
+            <code>frag_indexes</code> がリストのリストになるため比較が常に False になり、
+            既に置いた断片を新規生成と誤認して断片をスキップする）。<strong>それ以上は書かない。</strong></li>
+          <li>節の見出しは既存に合わせる（<code>## PromptSMILES</code> + <code>### ...</code>）。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="2">
+      <li>
+        <h3>Step 2: 検証（メインエージェントが実施。ライブラリ本体の修正もここで行う）</h3>
+        <p><strong>対象ファイル:</strong> 実行のみ（<code>site-packages</code> はリポジトリ外なので
+          メインエージェントが直接適用する）</p>
+        <ul>
+          <li><code>samplers.py:796</code> と <code>:865</code> にパッチを当てる</li>
+          <li>修正前後で <code>not any(...)</code> の判定が変わることを、実際の値で確認する</li>
+          <li><code>_single_sample</code> の <code>:649</code> / <code>:701</code> が
+            <strong>変更されていない</strong>ことを確認する</li>
+          <li>3断片以上・同一断片を含む linking 行を実モデルで生成し、修正前後で結果が変わるかを見る</li>
+          <li><code>python -c "import promptsmiles"</code> が通ること</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 1 の後</p>
+      </li>
+    </article>
+  </ol>
+</section>
+</body>
+</html>

@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Plan: PromptSMILES が対応できない行を代替生成せず、非対応として記録する (2026-08-09)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; }
+  h1 { border-bottom: 2px solid #333; }
+  h2 { border-bottom: 1px solid #ccc; margin-top: 2em; }
+  .step { margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+  pre { background: #f4f4f4; padding: 0.8em; border-radius: 4px; overflow-x: auto; }
+  table { border-collapse: collapse; margin: 1em 0; width: 100%; }
+  th, td { border: 1px solid #ddd; padding: 0.4em 0.7em; text-align: left; font-size: 0.95em; }
+  th { background: #f4f4f4; }
+  .warn { background: #fff3f3; border-left: 4px solid #d9534f; padding: 0.8em 1em; margin: 1em 0; }
+  .note { background: #eef6ff; border-left: 4px solid #4a90d9; padding: 0.8em 1em; margin: 1em 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plan: PromptSMILES が対応できない行を代替生成せず、非対応として記録する</h1>
+  <p class="meta">Date: 2026-08-09 | Status: pending-approval (rev.2 — 副表を廃止する方針に改訂)</p>
+</header>
+
+<section id="overview">
+  <h2>概要</h2>
+  <p>同日の <code>promptsmiles_fair_comparison_subset</code> で <code>fragment</code> 列に元の断片集合を
+  書くようにしたが、<strong>生成側が依然として対応不可の行を無理やり生成している</strong>ため、
+  主表の数値が他手法と同じ意味を持たない。本計画でそこを直す。</p>
+
+  <h3>問題1: 対応できない課題をすり替えて生成している</h3>
+  <div class="warn">
+    <p><code>select_prompt_fragments</code> は、PromptSMILES が表現できない断片集合
+    （attachment point を2個以上持つ断片を含む集合）に対し、<strong>最大断片1個だけの
+    scaffold decoration</strong> という代替課題を与えて生成させている。該当は test 全行の
+    <strong>90.5%（brics）/ 84.3%（rc_cms）</strong>。</p>
+    <p>この代替は PromptSMILES の仕様ではなく我々の設計判断であり、主表に載る数値は
+    「手法が課題を解けたか」と「我々の代替規則がどれだけ当たったか」の混合物になっている。
+    選択規則をサイズ最大から結合点最多に変えるだけで条件に渡る原子量が
+    48.5% → 36.8%（brics）と変わることからも、この数値が比較の基準になっていないことが分かる。</p>
+  </div>
+
+  <p>実測した代替の内訳（フォールバック行のうち prompt された断片の attachment point 数）:</p>
+  <table>
+    <tr><th></th><th>1個</th><th>2個</th><th>3個以上</th></tr>
+    <tr><td>brics (74,631行)</td><td>33,052 (44.3%)</td><td>32,088 (43.0%)</td><td>9,491 (12.7%)</td></tr>
+    <tr><td>rc_cms (76,690行)</td><td>19,797 (25.8%)</td><td>35,803 (46.7%)</td><td>21,090 (27.5%)</td></tr>
+  </table>
+  <p>attachment point が1個の断片を scaffold として渡した場合、<code>ScaffoldDecorator</code> は
+  置換基を1本伸ばして終わる。scaffold decoration ではなく「種を1個与えた de novo 生成」であり、
+  brics ではフォールバック行の44%がこれに該当する。</p>
+
+  <h3>問題2: 失敗行を predictions.csv から落としている</h3>
+  <p>他の2手法は失敗行を落とさない。</p>
+  <table>
+    <tr><th>手法</th><th>失敗時の扱い</th><th>行数</th></tr>
+    <tr><td>FragGPT</td>
+      <td><code>predictions</code> を <code>INVALID_SMILES</code> で初期化し成功分だけ上書き
+        （<code>generation_fraggpt_func.py:109</code>）</td><td>test と常に同じ</td></tr>
+    <tr><td>SAFE</td>
+      <td>デコード失敗候補のみ <code>INVALID_SMILES</code>
+        （<code>generation_safe_func.py:161</code>）</td><td>test と常に同じ</td></tr>
+    <tr><td><strong>PromptSMILES</strong></td>
+      <td><strong><code>continue</code> で行ごと破棄（300, 305, 341行）</strong></td>
+      <td><strong>test より減る</strong></td></tr>
+  </table>
+  <p>PromptSMILES だけが行を落とすため、主表の平均が「生成できた行だけの平均」になり、
+  他手法と分母が揃わない。</p>
+
+  <h3>方針</h3>
+  <div class="note">
+    <p><strong>PromptSMILES が表現できない集合は生成しない。</strong> その行は他手法の失敗行と
+    同じく <code>INVALID_SMILES</code> で埋めて <code>predictions.csv</code> に残す。</p>
+    <p>これで <code>stats.csv</code> の時点で4手法が「同一の test 行」「同一の断片集合」
+    「同一の失敗の数え方」で採点されるため、<strong>主表だけで厳密な比較が成立する</strong>。
+    我々が発明した代替規則が数値に混入せず、「サイズ最大か結合点最多か」という決められない
+    選択そのものが消える。</p>
+  </div>
+
+  <h3>副表を廃止する</h3>
+  <p><code>analyze_predictions.py</code> の <code>spec_cond_frags</code> /
+  <code>spec_stats.csv</code> / <code>no_spec_stats.csv</code> は初回コミット
+  <code>d139920</code>（2025-12-16）からある分析で、scaffold decoration と linker design しか
+  できない生成器を想定したもの。SAFE は <code>pass_safe</code> に断片集合全体を入れて条件付けする
+  形になり、この制約が当てはまらなくなったため<strong>当初の動機は消えている</strong>。</p>
+  <p>上記の方針により主表だけで厳密比較が取れるので、この分析は不要と判断し削除する。
+  <code>results/</code> に <code>spec_stats.csv</code> は1つも存在せず、実際に回されたこともない。</p>
+
+  <h3>生成に回されなかった行の記録</h3>
+  <p>削除するのは部分集合の<strong>統計</strong>であって、記録は残す。非生成行は次の3箇所に残る。</p>
+  <table>
+    <tr><th>粒度</th><th>場所</th><th>内容</th></tr>
+    <tr><td>行単位</td><td><code>predictions.csv</code> の <code>sampler</code> 列</td>
+      <td><code>unsupported</code> / <code>invalid_target</code> / <code>generation_error</code></td></tr>
+    <tr><td>行単位</td><td><code>predictions.csv</code> の <code>fragment</code> 列</td>
+      <td>生成に回されなかった断片集合そのもの</td></tr>
+    <tr><td>集計</td><td><code>generation_params.txt</code></td>
+      <td>理由別の件数と test 全行に対する割合</td></tr>
+  </table>
+
+  <h3>副次的な効果</h3>
+  <p>生成対象が brics 82,441行 → 7,810行、rc_cms 90,974行 → 14,284行 に減るため、
+  <strong>生成時間が約1/10になる</strong>。</p>
+
+  <h2>スコープ外</h2>
+  <ul>
+    <li>promptsmiles ライブラリ本体の変更。</li>
+    <li>他手法（RFFMG / SAFE / FragGPT）の生成・評価コード。</li>
+    <li><code>evaluation_func.py:443</code> の <code>validfragratio_exH</code> が非 exH 版を
+      呼んでいる件（別件）。</li>
+    <li>図の作成、生成の実行。</li>
+  </ul>
+</section>
+
+<section id="plan">
+  <h2>実装計画</h2>
+  <ol>
+    <article class="step" data-step="1">
+      <li>
+        <h3>Step 1: 対応できない行を生成せず、非対応として記録する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/func/generation_promptsmiles_func.py</code></p>
+        <p><strong>変更内容:</strong></p>
+        <ul>
+          <li><code>is_promptsmiles_expressible(fragment_set: str) -&gt; bool</code> をこのモジュールに
+            定義する。条件は<strong>「断片が1個」または「全断片の attachment point がちょうど1個」</strong>。
+            <ul>
+              <li>断片1個 → <code>ScaffoldDecorator</code>（attachment point は何個でもよい）</li>
+              <li>全断片が1点 → <code>FragmentLinker</code>（3断片以上でも <code>scan=True</code> が
+                自動で有効になる）</li>
+            </ul>
+            実装は文字列操作のみ（<code>split('.')</code> と <code>count('*')</code>）。
+            Google style docstring に、この条件が PromptSMILES の表現可能範囲と一致する理由を
+            1〜2行で書く。<strong>それ以上は書かない。</strong></li>
+          <li><code>select_prompt_fragments</code> を書き換える。
+            <ul>
+              <li>冒頭で <code>is_promptsmiles_expressible(fragment_set)</code> が False なら
+                <strong><code>None</code> を返す</strong>。これで戻り値型
+                <code>tuple[str, list[str]] | None</code> が実態と一致する（現在は None を返す経路が
+                無く型注釈が嘘になっている）。</li>
+              <li>True の場合のみ、断片1個なら <code>("scaffold", [その断片])</code>、
+                それ以外は <code>("linking", 全断片をサイズ降順)</code> を返す。</li>
+              <li><strong><code>max(fragments, key=GetNHA)</code> による最大断片の選択を削除する。</strong>
+                これが代替課題を作っていた本体。<code>GetNHA</code> / <code>func.fragmentation</code> の
+                import が他で使われていなければ外す。</li>
+              <li>docstring を新しい契約に書き直す。「表現できない集合は None を返し、呼び出し側が
+                非対応行として記録する」ことを明記する。</li>
+            </ul>
+          </li>
+          <li><code>main()</code> の生成ループを FragGPT と同じ形にする
+            （<code>generation_fraggpt_func.py:109</code> が手本）。
+            <ul>
+              <li><code>predictions</code> を<strong>全 test 行ぶん
+                <code>[[INVALID_SMILES] * n_samples]</code> で初期化</strong>する。</li>
+              <li><code>sampler_names</code> も全行ぶん用意し、既定値を非対応を表す値にする。</li>
+              <li><code>fragment</code> 列は全 test 行の元の断片集合、<code>target</code> 列は
+                全 test 行の SMILES。<code>prompt_fragments</code> は生成した行のみ埋め、
+                それ以外は空文字。</li>
+              <li>生成できた行だけ上書きする。<strong><code>continue</code> による行の破棄を全廃する</strong>
+                （現 300, 305, 341行）。</li>
+            </ul>
+          </li>
+          <li><code>sampler</code> 列の値を5種類にする。既存の <code>scaffold</code> /
+            <code>linking</code> に加えて:
+            <ul>
+              <li><code>unsupported</code> — 断片集合が PromptSMILES で表現できない</li>
+              <li><code>invalid_target</code> — 目的分子の SMILES が RDKit で読めない</li>
+              <li><code>generation_error</code> — promptsmiles が例外を投げた</li>
+            </ul>
+            後ろ2つは実データで0件だが、行を落とさないために残す。</li>
+          <li><strong>生成に回されなかった行を記録すること。</strong> <code>skip_counts</code> は
+            破棄数ではなく「<code>INVALID_SMILES</code> で埋めた行数」を数えるものになるので、
+            変数名と <code>format_run_summary</code> の docstring・出力文言をその意味に直す。
+            <code>format_run_summary</code> は理由別の件数に加えて<strong>test 全行に対する割合</strong>も
+            出すこと（どれだけが生成に回らなかったかが一目で分かるように）。
+            <code>generation_error</code> の例外メッセージは従来どおり <code>log_lines</code> に残す。</li>
+          <li><code>MIN_LINK_FRAGMENTS</code> の定数とコメントは <code>is_promptsmiles_expressible</code> の
+            条件と重複するので、どちらか一方に集約する。<code>FragmentLinker</code> の
+            <code>IndexError</code> を避ける根拠として残す必要があるかを判断し、不要なら削除する。</li>
+          <li>行数の <code>assert</code> を、全リストが <code>len(test_smiles)</code> と一致することを
+            確かめる形に変える。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="2">
+      <li>
+        <h3>Step 2: 用途の消えた部分集合分析を削除する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/analyze_predictions.py</code></p>
+        <p><strong>変更内容:</strong></p>
+        <ul>
+          <li><code>spec_cond_frags</code> を削除する。</li>
+          <li><code>summarize_generation_stats</code> を削除する（この関数はこのブロックからしか
+            呼ばれていない）。</li>
+          <li><code>spec_stats.csv</code> / <code>no_spec_stats.csv</code> を書いている
+            <code>if 1:</code> ブロック全体を削除する。</li>
+          <li>削除により未使用になる import があれば外す。<strong>他のブロック（<code>if 0:</code>）が
+            使っているものは残すこと。</strong> 特に <code>np</code> は他ブロックでも使われているので
+            消さないこと。</li>
+          <li>他の <code>if 0:</code> ブロックには手を触れない。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="3">
+      <li>
+        <h3>Step 3: README を主表だけの説明に直す</h3>
+        <p><strong>対象ファイル:</strong> <code>README.md</code>, <code>README_ja.md</code></p>
+        <p><strong>変更内容:</strong></p>
+        <ul>
+          <li>同日の計画で追記した「主表 / 副表」の段落を、次の内容に<strong>差し替える</strong>。
+            書く内容は2点だけ。<strong>それ以上は書かない。</strong>
+            <ol>
+              <li><code>stats.csv</code> は全 test 行を対象とし、4手法とも同じ断片集合を要求される。
+                PromptSMILES が表現できない断片集合の行は生成されず <code>INVALID_SMILES</code> として
+                0点で集計されるので、<strong>カバレッジを含んだ数値</strong>になる。これは FragGPT の
+                組み立て失敗・SAFE のデコード失敗と同じ扱いである。</li>
+              <li>どの行が生成に回らなかったかは <code>predictions.csv</code> の <code>sampler</code> 列で
+                分かる（<code>scaffold</code> / <code>linking</code> / <code>unsupported</code> /
+                <code>invalid_target</code> / <code>generation_error</code>）。件数の集計は
+                <code>generation_params.txt</code> にある。</li>
+            </ol>
+          </li>
+          <li>PromptSMILES の生成コマンドの説明に、<strong>表現できない断片集合では生成を行わない</strong>旨を
+            1行足す。</li>
+          <li><code>spec_stats.csv</code> に言及している箇所が他に無いことを確認して、あれば消す。</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 1、Step 2 の後</p>
+      </li>
+    </article>
+  </ol>
+</section>
+
+<section id="verify">
+  <h2>検証（実装後にメインエージェントが実施）</h2>
+  <ul>
+    <li><code>python -m py_compile</code> が対象ファイルすべてで通ること。</li>
+    <li><code>is_promptsmiles_expressible</code> を test 全行に適用し、True の行数が
+      brics <strong>7,810 / 82,441</strong> / rc_cms <strong>14,284 / 90,974</strong> になること。</li>
+    <li><code>analyze_predictions.py</code> から <code>spec_cond_frags</code> /
+      <code>summarize_generation_stats</code> / <code>spec_stats</code> の参照が0件になっていること。
+      残った <code>if 0:</code> ブロックが壊れていないこと（import 済みの名前がすべて解決すること）。</li>
+    <li>一時的な <code>--additional_path</code> で PromptSMILES を少数行だけ生成し、次を確認する。
+      <ul>
+        <li><code>predictions.csv</code> の行数が<strong>入力した test 行数と完全に一致</strong>すること
+          （1行も落ちない）。</li>
+        <li><code>sampler</code> 列に <code>scaffold</code> / <code>linking</code> /
+          <code>unsupported</code> が現れること。</li>
+        <li><code>unsupported</code> の行は <code>prediction_*</code> がすべて
+          <code>INVALID_SMILES</code>、<code>prompt_fragments</code> が空、<code>fragment</code> に
+          元の断片集合が残っていること。</li>
+        <li><code>scaffold</code> の行は <code>fragment</code> に <code>.</code> を含まない（断片1個）こと。
+          <strong>代替生成が消えたことをこれで確認する。</strong></li>
+        <li><code>linking</code> の行は <code>prompt_fragments</code> が <code>fragment</code> と
+          同じ断片集合であること。</li>
+        <li><code>generation_params.txt</code> に理由別の件数と割合が出ていること。</li>
+      </ul>
+    </li>
+    <li>確認後、一時ディレクトリを削除すること。</li>
+  </ul>
+</section>
+</body>
+</html>

@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Plan: FragGPT の組み立て失敗を握り潰さないようにする (2026-08-06)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; }
+  h1 { border-bottom: 2px solid #333; }
+  h2 { border-bottom: 1px solid #ccc; margin-top: 2em; }
+  .step { margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+  pre { background: #f4f4f4; padding: 0.8em; border-radius: 4px; overflow-x: auto; }
+  table { border-collapse: collapse; margin: 1em 0; width: 100%; }
+  th, td { border: 1px solid #ddd; padding: 0.4em 0.7em; text-align: left; font-size: 0.95em; }
+  th { background: #f4f4f4; }
+  .warn { background: #fff3f3; border-left: 4px solid #d9534f; padding: 0.8em 1em; margin: 1em 0; }
+  .note { background: #eef6ff; border-left: 4px solid #4a90d9; padding: 0.8em 1em; margin: 1em 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plan: FragGPT の組み立て失敗を握り潰さないようにする</h1>
+  <p class="meta">Date: 2026-08-06 | Status: approved</p>
+</header>
+
+<section id="overview">
+  <h2>概要</h2>
+  <p><code>assemble_fragments_with_reason</code> と <code>label_attachment_points</code> には
+  「失敗が失敗として集計されない」箇所が3つある。いずれも生成結果の集計を実態より良く見せてしまう。</p>
+
+  <h3>1. 結合次数の食い違いが断片の並び順で結果を変える（実測）</h3>
+  <p><code>assemble_fragments_with_reason</code> の77行目</p>
+  <pre><code>bond_type = next((bt for bt in bond_types if bt != Chem.BondType.SINGLE), Chem.BondType.SINGLE)</code></pre>
+  <div class="warn">
+    <p><code>next()</code> はタプルの先に来たほうを採るため、同じ矛盾入力でも
+    断片の書かれた順で結果が変わる。</p>
+    <table>
+      <tr><th>入力</th><th>採用</th><th>結果</th></tr>
+      <tr><td><code>[1*]=C(C)C.[1*]#CC</code></td><td>DOUBLE</td>
+        <td><code>CC=C(C)C</code> → <strong>ok</strong>（三重結合が二重結合に化ける）</td></tr>
+      <tr><td><code>[1*]#CC.[1*]=C(C)C</code></td><td>TRIPLE</td>
+        <td>→ <strong>sanitize_failure</strong></td></tr>
+      <tr><td><code>[1*]=C(C)C.[1*]C1CCCCC1</code></td><td>DOUBLE</td>
+        <td><code>CC(C)=C1CCCCC1</code> → <strong>ok</strong>（単結合側を無視）</td></tr>
+    </table>
+  </div>
+  <p>切断された結合の両端は本来同じ次数なので、食い違い自体がモデル出力の矛盾を示す。</p>
+
+  <h3>2. パースできない断片が黙って捨てられる（実測）</h3>
+  <p>49行目の walrus フィルタにより、壊れた断片は捨てられ残りだけで組み上がる。</p>
+  <pre><code>assemble_fragments_with_reason("[1*]CC.[1*]O.C1CC")  ->  ('CCO', 'ok')</code></pre>
+  <p><code>parse_failure</code> になるのは全断片が壊れたときだけで、docstring の
+  「RDKit could not parse one of the fragments」と食い違う。</p>
+
+  <h3>3. <code>label_attachment_points</code> の <code>Raises: ValueError</code> が嘘（実測）</h3>
+  <p>同じ書き方で断片が黙って消える。モジュール内に <code>raise ValueError</code> は1つも無い。</p>
+  <pre><code>label_attachment_points(["*c1ccc(*)cc1", "C1CC", "*O"], rng)  ->  2断片（1つ消失、例外なし）</code></pre>
+
+  <h3>生成側の死んだコード</h3>
+  <p>テスト分割の <code>pass_fragments</code> は全行パース可能であることを実測で確認した。</p>
+  <table>
+    <tr><th>frag</th><th>行数</th><th>断片数</th><th>パース失敗</th><th>空断片</th></tr>
+    <tr><td>brics</td><td>82,441</td><td>300,336</td><td>0</td><td>0</td></tr>
+    <tr><td>rc_cms</td><td>90,974</td><td>240,808</td><td>0</td><td>0</td></tr>
+  </table>
+  <p><code>label_attachment_points</code> が断片を落とした行も 20,000行×2手法で 0 件。
+  よって <code>generation_fraggpt_func.py</code> のプロンプト失敗まわりは到達不能であり、
+  <code>try/except</code> を足すのではなく削除する。Step 4 で <code>ValueError</code> を
+  送出するようにすれば、万一データが壊れていた場合はその場で落ちる（黙って断片を捨てるより正しい）。</p>
+
+  <h3>空断片の扱い（Step 3 の注意点）</h3>
+  <div class="note">
+    <p>プロンプトは必ず <code>.</code> で終わる（<code>generation_fraggpt_func.py:90</code> の
+    <code>'.'.join(fragments) + '.'</code>）。そのため <code>batch_prompt + completion</code> は、
+    completion が空・<code>.</code> で終わる・<code>..</code> を含む場合に空断片を生む。
+    現状は <code>Chem.MolFromSmiles('')</code> が None ではなく原子0個の Mol を返すため無害。</p>
+    <p><strong>Step 3 で空断片を除外せずに厳格化すると、空 completion が
+    <code>parse_failure</code> に分類される。</strong>
+    現在それは <code>unmatched_dummy</code>（相手の断片が来なかった）と報告されており、
+    そちらが正しい。よって空文字のフィルタは必ず残す。</p>
+  </div>
+
+  <h3>スコープ外</h3>
+  <ul>
+    <li><code>predictions[start + position]</code> の修正（<strong>ユーザーが修正済み</strong>）</li>
+    <li>評価の立体比較（別タスク）</li>
+  </ul>
+</section>
+
+<section id="plan">
+  <h2>実装計画</h2>
+  <ol>
+    <article class="step" data-step="2">
+      <li>
+        <h3>Step 2: 結合次数の食い違いを失敗として扱う</h3>
+        <p><strong>対象ファイル:</strong> <code>src/func/fragment_for_fraggpt.py</code></p>
+        <ul>
+          <li><code>assemble_fragments_with_reason</code> の75-77行目（<code>bond_types</code> の
+            組み立てと <code>next()</code> による選択）を次の形に差し替える。
+            <pre><code>if first_bond.GetBondType() != second_bond.GetBondType():
+    return None, "bond_order_mismatch"
+bond_type = first_bond.GetBondType()</code></pre></li>
+          <li>78行目の <code>rwmol.AddBond(first_neighbor, second_neighbor, bond_type)</code> は変更しない。</li>
+          <li>docstring の <code>Returns</code> の失敗理由一覧に <code>bond_order_mismatch</code>
+            （切断された結合の両端で結合次数が一致しない）を追加する。既存の理由の説明文と
+            同じ体裁に揃えること。</li>
+          <li>docstring 冒頭の「of the two dummy bonds the one that is not single wins」という
+            説明は挙動と合わなくなるので、「両端の結合次数は一致していなければならない」旨に
+            書き換える。</li>
+          <li><code>format_failure_summary</code>（<code>generation_fraggpt_func.py</code>）は
+            理由文字列を汎用に列挙しているため<strong>変更不要</strong>。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="3">
+      <li>
+        <h3>Step 3: パースできない断片を失敗として扱う</h3>
+        <p><strong>対象ファイル:</strong> <code>src/func/fragment_for_fraggpt.py</code></p>
+        <ul>
+          <li><code>assemble_fragments_with_reason</code> の49行目
+            <pre><code>mols = [mol for fragment in fragments.split('.') if (mol := Chem.MolFromSmiles(fragment)) is not None]</code></pre>
+            を、<strong>空文字の断片を除外したうえで</strong>、残りが1つでもパースできなければ
+            <code>parse_failure</code> を返す形に変える。空文字のフィルタ（<code>if fragment</code>）は
+            必ず残すこと（概要「空断片の扱い」参照）。</li>
+          <li>既存の <code>try/except ValueError</code>（50-51行目）と <code>if not mols</code>
+            （52-53行目）の扱いは、新しい実装で <code>parse_failure</code> が返る経路が
+            二重にならないよう整理してよい。ただし<strong>断片が1つも無い入力は従来どおり
+            <code>parse_failure</code></strong> を返すこと。</li>
+          <li>46-47行目のコメント（断片を1つずつパースする理由）は残す。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="4">
+      <li>
+        <h3>Step 4: <code>label_attachment_points</code> を docstring どおり <code>ValueError</code> にする</h3>
+        <p><strong>対象ファイル:</strong> <code>src/func/fragment_for_fraggpt.py</code></p>
+        <ul>
+          <li>116行目の walrus フィルタをやめ、<code>Chem.MolFromSmiles</code> が None を返した
+            断片があれば <code>ValueError</code> を送出する。例外メッセージにはパースできなかった
+            断片の SMILES を含める。</li>
+          <li>docstring の <code>Raises: ValueError</code> はそのまま（これで記述と挙動が一致する）。</li>
+          <li>117-122行目（ダミー原子の収集・ラベル付け・<code>MolToSmiles</code>）は変更しない。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="5">
+      <li>
+        <h3>Step 5: 生成側の到達不能なコードを削除する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/func/generation_fraggpt_func.py</code></p>
+        <ul>
+          <li><code>main()</code> から次を削除する。
+            <ul>
+              <li><code>prompt_failures: Counter[str] = Counter()</code>（81行目）</li>
+              <li><code>prompt_fragments: list[list[str]] = []</code>（82行目）と
+                <code>prompt_fragments.append(fragments)</code>（91行目）</li>
+              <li><code>prompts</code> の型注釈 <code>list[str | None]</code> を
+                <code>list[str]</code> にする（83行目）</li>
+              <li>93行目の <code>sum(prompt is not None for prompt in prompts)</code> を
+                <code>len(prompts)</code> にする</li>
+            </ul>
+          </li>
+          <li><code>format_failure_summary</code> から次を削除する。
+            <ul>
+              <li>引数 <code>prompt_failures: Counter[str]</code>（16行目）と docstring の該当行（24行目）</li>
+              <li><code>f"rows without a prompt: {sum(prompt_failures.values())}"</code>（35行目）</li>
+              <li><code>lines += [f"  prompt failure ({reason}): {count}" ...]</code>（39行目）</li>
+            </ul>
+          </li>
+          <li>150行目の呼び出しから <code>prompt_failures</code> 引数を外す。</li>
+          <li><code>from collections import Counter</code> は <code>assembly_reasons</code> で
+            使い続けるので<strong>残す</strong>。</li>
+          <li>生成ループ（113-138行目）は一切変更しない
+            （<code>predictions[start + position]</code> は修正済み）。</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 4 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="6">
+      <li>
+        <h3>Step 6: 検証（メインエージェントが実施）</h3>
+        <p><strong>対象ファイル:</strong> 実行のみ（コード変更なし）</p>
+        <ul>
+          <li>全変更ファイルの構文チェックと import 確認</li>
+          <li><code>bond_order_mismatch</code> が断片の並び順に依存しないこと
+            （<code>[1*]=C(C)C.[1*]#CC</code> と <code>[1*]#CC.[1*]=C(C)C</code> の両方が
+            同じ理由を返す）</li>
+          <li>空 completion（<code>"[1*]CC." + ""</code>）が <code>parse_failure</code> ではなく
+            <code>unmatched_dummy</code> のままであること。末尾 <code>.</code> /
+            <code>..</code> を含む入力も従来どおり組み上がること</li>
+          <li>パース不能な断片を含む入力が <code>parse_failure</code> を返すこと</li>
+          <li><code>label_attachment_points</code> がパース不能な断片で <code>ValueError</code> を
+            送出すること</li>
+          <li><strong>実データ1万件で、変更前後の組み立て結果が一致すること</strong>
+            （正常系に影響が無いこと）</li>
+          <li>テスト全行（brics 82,441 / rc_cms 90,974）で <code>label_attachment_points</code> が
+            例外を出さないこと</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 5 の後</p>
+      </li>
+    </article>
+  </ol>
+</section>
+</body>
+</html>

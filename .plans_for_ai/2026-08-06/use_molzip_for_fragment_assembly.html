@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Plan: 断片の再結合を RDKit の molzip に置き換える (2026-08-06)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; }
+  h1 { border-bottom: 2px solid #333; }
+  h2 { border-bottom: 1px solid #ccc; margin-top: 2em; }
+  .step { margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+  pre { background: #f4f4f4; padding: 0.8em; border-radius: 4px; overflow-x: auto; }
+  table { border-collapse: collapse; margin: 1em 0; width: 100%; }
+  th, td { border: 1px solid #ddd; padding: 0.4em 0.7em; text-align: left; font-size: 0.95em; }
+  th { background: #f4f4f4; }
+  .warn { background: #fff3f3; border-left: 4px solid #d9534f; padding: 0.8em 1em; margin: 1em 0; }
+  .note { background: #eef6ff; border-left: 4px solid #4a90d9; padding: 0.8em 1em; margin: 1em 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plan: 断片の再結合を RDKit の molzip に置き換える</h1>
+  <p class="meta">Date: 2026-08-06 | Status: approved</p>
+</header>
+
+<section id="overview">
+  <h2>概要</h2>
+  <p><code>assemble_fragments_with_reason</code> は、ダミー原子を削除してから <code>AddBond</code> で
+  結合を張り直している。RDKit のキラルタグは「その原子に結合が張られた順序」を基準とする
+  相対的な指定なので、この手順は<strong>不斉中心を反転させる</strong>。</p>
+
+  <h3>機構（実データ例2で追跡した結果）</h3>
+  <p>断片 <code>[1*]C(=O)[C@@H]([2*])C[5*]</code> の不斉炭素で、隣接順は次のように変化する。</p>
+  <pre><code>隣接順（元）   : [カルボニルC, ダミー[2*], CH2]     ← ダミーは2番目
+AddBond 後     : [カルボニルC, ダミー[2*], CH2, N]  ← 置き換え先 N は末尾にしか追加できない
+RemoveAtom 後  : [カルボニルC,             CH2, N]  ← N は末尾のまま
+キラルタグ     : CHI_TETRAHEDRAL_CW（不変）</code></pre>
+  <div class="warn">
+    <p>本来 N はダミーがいた2番目に入るべきだが末尾に入るため、2番目と3番目が入れ替わる。
+    互換1回＝奇順列なので、同じタグが逆の立体を指す（<code>[C@H]</code> → <code>[C@@H]</code>）。</p>
+    <p>原因は RDKit の API の制約で、<code>AddBond</code> は末尾にしか追加できず
+    <code>RemoveAtom</code> は抜くだけ。結果として「k番目にあったものを末尾へ移動」する操作になり、
+    移動距離 <code>(隣接数 − 1 − k)</code> が奇数なら反転、偶数ならたまたま正しくなる。</p>
+  </div>
+
+  <h3>実測した影響（学習データ各1万件を組み立て直して元の分子と比較）</h3>
+  <table>
+    <tr><th></th><th>現行の手組み</th><th>molzip</th><th>SAFE（参考）</th></tr>
+    <tr><td>brics</td><td>84.04%</td><td><strong>92.58%</strong></td><td>93.12%</td></tr>
+    <tr><td>rc_cms</td><td>85.83%</td><td><strong>100.00%</strong></td><td>100.00%</td></tr>
+  </table>
+  <p>現行の不一致の内訳は brics で「立体が減った 728 / <strong>向きが違う 868</strong>」、
+  rc_cms で「立体が減った 477 / <strong>向きが違う 940</strong>」。
+  半分以上が反転（誤った立体異性体の生成）。</p>
+  <p><strong>rc_cms は表現の限界がゼロ</strong>で、現在の 14% はすべて実装由来。
+  brics の残り約7%は本物の表現限界であり、SAFE も同じ壁（93.12%）に当たる。
+  molzip と SAFE がほぼ一致することが裏付け。</p>
+
+  <h3>他手法との比較</h3>
+  <ul>
+    <li><strong>SAFE</strong>: 原子レベルの手術をしない。<code>safe.decode()</code> は結合点の数字を
+      環閉じ結合に戻す文字列レベルの変換で、RDKit は最終形を1回パースする。よって反転しない。</li>
+    <li><strong>PromptSMILES</strong>: 組み立て工程が無い。モデルが SMILES 全体を書き、
+      <code>Chem.MolFromSmiles</code> で妥当性を見るだけ。</li>
+    <li><strong>FragGPT だけが原子を削除・再結合している。</strong></li>
+  </ul>
+
+  <h3>事前検証済みの事項</h3>
+  <div class="note">
+    <ul>
+      <li><code>rdmolops.molzip</code> は <code>MolzipParams.label = MolzipLabel.Isotope</code> で
+        同位体ラベル付きダミーを結合できる。二重結合・三重結合も正しく復元される
+        （<code>[1*]=C(C)C.[1*]=C1CCCCC1</code> → <code>CC(C)=C1CCCCC1</code>、
+        <code>[1*]#CC.[1*]#CC</code> → <code>CC#CC</code>）。</li>
+      <li>組み立て後の <code>Chem.AssignStereochemistry(cleanIt=True, force=True)</code> は
+        <strong>残すべき</strong>（brics 92.55% → 92.58%、rc_cms は不変）。</li>
+      <li><strong>断片は個別にパースしてから <code>CombineMols</code> する現行方針を維持すること。</strong>
+        文字列を一括パースすると環閉じ数字が点をまたいで結合する
+        （<code>C1CC.C1CC</code> → <code>CCCCCC</code>）。この危険は実在する。</li>
+      <li><code>CombineMols</code> + <code>molzip</code> 方式で brics 92.58% / rc_cms 100.00%、
+        失敗0件を確認済み。</li>
+    </ul>
+  </div>
+
+  <h3>スコープ外</h3>
+  <ul>
+    <li>評価側の立体比較（<code>isomericSmiles</code> の扱い）。表現の限界として受け入れる方針</li>
+    <li>SAFE / PromptSMILES / RFFMG の変更</li>
+  </ul>
+</section>
+
+<section id="plan">
+  <h2>実装計画</h2>
+  <ol>
+    <article class="step" data-step="1">
+      <li>
+        <h3>Step 1: 結合操作を molzip に置き換える</h3>
+        <p><strong>対象ファイル:</strong> <code>src/func/fragment_for_fraggpt.py</code></p>
+        <ul>
+          <li>import に <code>from rdkit.Chem import rdmolops</code> を追加する。</li>
+          <li>モジュール冒頭に molzip の設定を1度だけ作る定数を置く。既存の定数と同じ体裁に揃えること。
+            <pre><code>MOLZIP_PARAMS = rdmolops.MolzipParams()
+MOLZIP_PARAMS.label = rdmolops.MolzipLabel.Isotope</code></pre></li>
+          <li><code>assemble_fragments_with_reason</code> の以下は<strong>そのまま残す</strong>。
+            <ul>
+              <li>断片を個別にパースして <code>CombineMols</code> する処理（46-56行目相当）</li>
+              <li><code>dummies_by_label</code> の構築と <code>unmatched_dummy</code> 判定</li>
+              <li><code>_dummy_bond</code> による None 判定（<code>unmatched_dummy</code>）</li>
+              <li><code>first_neighbor == second_neighbor</code> / 既に結合済み の判定
+                （<code>invalid_connection</code>）</li>
+              <li>結合次数の一致判定（<code>bond_order_mismatch</code>）</li>
+              <li><code>Chem.SanitizeMol</code> と
+                <code>Chem.AssignStereochemistry(cleanIt=True, force=True)</code></li>
+              <li><code>multiple_components</code> 判定</li>
+            </ul>
+          </li>
+          <li>以下を<strong>削除</strong>する。
+            <ul>
+              <li><code>rwmol = Chem.RWMol(combined)</code></li>
+              <li><code>rwmol.AddBond(first_neighbor, second_neighbor, bond_type)</code></li>
+              <li>ダミー原子を降順に削除するループとその直前のコメント</li>
+              <li>一致確認後に <code>bond_type</code> を決める代入（molzip が結合次数を決めるため不要）</li>
+            </ul>
+          </li>
+          <li>検査ループは <code>rwmol</code> ではなく <code>combined</code> を参照するように変える
+            （<code>_dummy_bond(combined, ...)</code> / <code>combined.GetBondBetweenAtoms(...)</code>）。
+            検査は結合操作の<strong>前</strong>に全ラベル分を走らせ、1つでも問題があればその理由を返すこと。</li>
+          <li>検査を通過したら <code>rdmolops.molzip(combined, MOLZIP_PARAMS)</code> で結合し、
+            その結果に対して既存の <code>Chem.SanitizeMol</code> /
+            <code>Chem.AssignStereochemistry</code> を適用する。molzip が例外を投げた場合も
+            既存の <code>except</code> で <code>sanitize_failure</code> を返してよい。</li>
+          <li>docstring を更新する。
+            <ul>
+              <li>現在の「Dummy atoms sharing an isotope label are the two ends of one broken bond:
+                the atoms they are attached to are bonded again and the dummies are deleted」以下の
+                説明を、molzip に委ねる旨に書き換える。</li>
+              <li><strong>なぜ molzip を使うのかを1行で残すこと</strong>（ダミーを削除して結合を
+                張り直すと隣接順が変わり不斉中心が反転するため）。これは非自明な制約なので
+                コメントに値する。</li>
+              <li>結合次数についての説明は「両端の次数が一致していることを検査し、実際の結合は
+                molzip が行う」旨に改める。</li>
+              <li><code>Returns</code> の失敗理由一覧は変更しない（理由の集合は変わらない）。</li>
+            </ul>
+          </li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="2">
+      <li>
+        <h3>Step 2: 検証（メインエージェントが実施）</h3>
+        <p><strong>対象ファイル:</strong> 実行のみ（コード変更なし）</p>
+        <ul>
+          <li>構文チェックと import 確認</li>
+          <li><strong>学習データ各1万件で、元の分子との完全一致率が brics 92.58% /
+            rc_cms 100.00% に改善すること</strong>（変更前は 84.04% / 85.83%）</li>
+          <li>骨格（<code>isomericSmiles=False</code>）が変更前後で 100% 一致すること
+            （立体以外は何も変わっていないこと）</li>
+          <li>失敗理由が従来どおり返ること
+            <ul>
+              <li><code>unmatched_dummy</code>: <code>[1*].[1*]</code>、<code>[1*]C.[1*]</code>、
+                <code>C[1*]C.C[1*]C</code>、<code>[1*]CC.</code></li>
+              <li><code>invalid_connection</code>: <code>C([1*])[1*]</code>、
+                <code>[1*]C[2*].[1*]C[2*]</code></li>
+              <li><code>bond_order_mismatch</code>: <code>[1*]=C(C)C.[1*]#CC</code> と
+                <code>[1*]#CC.[1*]=C(C)C</code>（順序非依存）</li>
+              <li><code>parse_failure</code>: <code>[1*]CC.[1*]O.C1CC</code>、
+                <code>C1CC.C1CC</code>、<code>""</code></li>
+            </ul>
+          </li>
+          <li>二重結合・三重結合の切断が復元されること</li>
+          <li>末尾 <code>.</code> / <code>..</code> 連続を含む入力が従来どおり組み上がること</li>
+          <li><code>label_attachment_points</code> の挙動が変わっていないこと</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 1 の後</p>
+      </li>
+    </article>
+  </ol>
+</section>
+</body>
+</html>

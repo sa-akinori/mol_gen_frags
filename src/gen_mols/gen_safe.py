@@ -21,11 +21,11 @@ if __name__=='__main__':
 
     if model_ver == 'pretrained':
         model_path = f'{BASEPATH}/models/safe/gpt/pretrained/'
-        output_dir = f'{BASEPATH}/results/safe/gpt/pretrained/{frag_method}/beam/'
+        output_dir = f'{BASEPATH}/results/safe/gpt/pretrained/{frag_method}/beam/normal/'
 
     else:  # finetuning / from_scratch
         model_path = f'{BASEPATH}/models/safe/gpt/{model_ver}/{frag_method}/best_model'
-        output_dir = f'{BASEPATH}/results/safe/gpt/{model_ver}/{frag_method}/beam/'
+        output_dir = f'{BASEPATH}/results/safe/gpt/{model_ver}/{frag_method}/beam/normal/'
     
     cmd = [
         "python", f"{BASEPATH}/src/func/generation_safe_func.py",

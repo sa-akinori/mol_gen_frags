@@ -1,4 +1,5 @@
 import os
+import shutil
 import pandas as pd
 import numpy as np
 from rdkit import Chem
@@ -20,26 +21,22 @@ from glob import glob
 from typing import Set, Dict
 
 def loadTrainSmiles(
-    arc_name:str,
     file_name:str,
     )->Set[str]:
     """Load the molecules a model was trained on as a set of canonical SMILES.
 
-    The reader is chosen by the kind of path given, not by ``arc_name``: the training
-    molecules are stored either as a HuggingFace dataset (``smiles`` column of the ``train``
-    split) or as a one-column text file.
+    The reader is chosen by the kind of path given: the training molecules are stored either
+    as a HuggingFace dataset (``smiles`` column of the ``train`` split) or as a one-column
+    text file.
 
-    | model        | file_name                                 | kind      | reader                       |
-    |--------------|-------------------------------------------|-----------|------------------------------|
-    | safe_gpt     | ``data/safe/{frag}/normal``               | directory | ``load_from_disk`` -> smiles |
-    | promptsmiles | ``data/promptsmiles/{frag}/normal``       | directory | same                         |
-    | fraggpt      | ``data/fraggpt/{frag}/normal``            | directory | same                         |
-    | t5chem / gpt | ``data/rffmg/{frag}/normal/train.target`` | file      | ``pd.read_csv``              |
+    | file_name                                 | kind      | reader                       |
+    |-------------------------------------------|-----------|------------------------------|
+    | ``data/safe/{frag}/normal``               | directory | ``load_from_disk`` -> smiles |
+    | ``data/promptsmiles/{frag}/normal``       | directory | same                         |
+    | ``data/fraggpt/{frag}/normal``            | directory | same                         |
+    | ``data/rffmg/{frag}/normal/train.target`` | file      | ``pd.read_csv``              |
 
     Args:
-        arc_name (str): Layout of the generated molecules (``safe_gpt`` or ``t5chem``). Kept
-            so that this function is called with the same value as :func:`loadGenSmiles`;
-            it does not select the reader.
         file_name (str): HuggingFace dataset directory, or a text file with one SMILES per line.
 
     Returns:
@@ -53,25 +50,6 @@ def loadTrainSmiles(
     trsmiles = Parallel(n_jobs=-1)(delayed(Smi2CanSmi)(smi) for smi in tqdm(trsmiles, desc='trsmiles, convert canonical'))
     return set(trsmiles)
 
-def loadGenSmiles(
-    arc_name:str,
-    file_name:str,
-    testInputfile:str=None,
-    )->pd.DataFrame:
-    
-    if arc_name == 'safe_gpt':
-        genmols = pd.read_csv(file_name, index_col=0)
-        target_pattern = r"time_out|error"
-        cols_to_check  = [col for col in genmols.columns if 'prediction' in col]
-        genmols = genmols[~genmols[cols_to_check].apply(lambda row: row.str.contains(target_pattern, na=False).all(), axis=1)]
-        
-    elif arc_name == 't5chem':
-        genmols = pd.read_csv(file_name)
-        inmols  = pd.read_csv(testInputfile, sep='>', header=None, names=['fragment']).iloc[:,[0]]
-        genmols = pd.concat([inmols, genmols], axis=1)   
-    
-    return genmols
-    
 def Smi2Mol(smi:str)->Chem.Mol:
     mol = None
     try:
@@ -415,35 +393,41 @@ def calculate_heavy_atom_growth(
     
     return diff_heavy_atoms
 
-def calculateRank(target_can, valid_smis):
+def calculateRank(target_can, candidate_smis):
     """
-    Find the rank of the target molecule among valid canonical SMILES.
+    Find the rank of the target molecule among the generated candidates.
 
     Args:
         target_can: Target molecule canonical SMILES
-        valid_smis: List of canonical SMILES strings
+        candidate_smis: Candidates in generation order as canonical SMILES, None for the ones
+            that could not be parsed (their slot is kept so the rank stays the k of prediction_k)
 
     Returns:
         int: Rank of first occurrence (1-indexed), or 0 if not found
     """
     if target_can is None:
         return 0
-    for i, smi in enumerate(valid_smis):
+    for i, smi in enumerate(candidate_smis):
         if smi == target_can:
             return i + 1
     return 0
 
 def evaluation_func(genmoldf, catsmiCol, trsmiles, nmaxgen, algorithm_name):
 
-    # Create valid smiles
-    genmoldf['valid_smis']   = genmoldf[catsmiCol].apply(lambda x: [Smi2CanSmi(s) for s in x if Smi2Mol(s) is not None])
+    # A failed candidate keeps its slot as None so its position stays the k of prediction_k.
+    # An empty one is caught by its canonical SMILES: Chem.MolFromSmiles('') returns an atom-less
+    # Mol instead of None.
+    canonicalize = lambda smi: Smi2CanSmi(smi) or None
+    canonical_smis           = genmoldf[catsmiCol].apply(lambda x: [canonicalize(s) for s in x])
+    genmoldf['valid_smis']   = canonical_smis.apply(lambda x: [s for s in x if s is not None])
     genmoldf['nvalid']       = genmoldf['valid_smis'].apply(len)
     genmoldf['validratio']   = genmoldf['nvalid']/nmaxgen
 
-    # Calculate rank (rediscovery)
+    # Ranked on the position-preserving list: ranking the valid candidates only would move a
+    # target up by as many candidates as failed before it.
     if 'target' in genmoldf.columns and 'rank' not in genmoldf.columns:
-        genmoldf['rank'] = genmoldf.apply(
-            lambda row: calculateRank(Smi2CanSmi(row['target']), row['valid_smis']), axis=1)
+        genmoldf['rank'] = [calculateRank(Smi2CanSmi(target), smis)
+                            for target, smis in zip(genmoldf['target'], canonical_smis)]
 
     # Create unique smiles
     genmoldf['unique_smis']  = genmoldf['valid_smis'].apply(lambda x:list(set(x)))
@@ -494,27 +478,33 @@ def sc3_check_genmol_results(
     # options for visualization (excel file)
     nanalogsForVis	= 30  # number of gen_mols for visualization purpose ()
     nmolsForVis	 	= 100
-    rseed			= 42  
-    nmaxgen			= 50 # 50 smiles are generated at most 
+    rseed			= 42
     rng     = np.random.RandomState(rseed)
-    
+
     os.makedirs(outfd, exist_ok=True)
-    
-    # random selection for making visualization table 
+
+    # Sorted by index, not by name, so that prediction_10 stays behind prediction_2.
+    predcols    = sorted([col for col in genmols.columns if col.startswith('prediction_')], key=lambda col: int(col.split('_')[-1]))
+    nmaxgen     = len(predcols)
+
+    # Before the visualization: WriteDataFrameSmilesToXls hands a NaN cell to RDKit as a molecule.
+    genmols     = genmols.where(genmols.notnull(), '')
+
+    # random selection for making visualization table
     if not skipCreateExcel:
-        cols        = ['fragment', 'target'] + [f'prediction_{i}' for i in np.sort(rng.choice(np.arange(1,nmaxgen+1),nanalogsForVis, replace=False))]
-        selCatmols  = genmols[cols].dropna(axis=0) # row-wise drop
-        selCatmols  = selCatmols.sample(min(nmolsForVis, selCatmols.shape[0]), random_state=rseed)
+        viscols     = np.sort(rng.choice(np.arange(1,nmaxgen+1), min(nanalogsForVis, nmaxgen), replace=False))
+        cols        = ['fragment', 'target'] + [f'prediction_{i}' for i in viscols]
+        selCatmols  = genmols[cols].sample(min(nmolsForVis, genmols.shape[0]), random_state=rseed)
         outfname    = f'{outfd}/gen_samples_visualize.tsv'
         selCatmols.to_csv(outfname, sep='\t')
         WriteDataFrameSmilesToXls(selCatmols, cols, out_filename=outfname.replace('.tsv', '.xlsx'))
 
     # checking the statistics (validity and correctness (containing the same scaffold)
-    genmols     = genmols.where(genmols.notnull(), '') # convert Null to ''
-    predcols    = [f'prediction_{i}' for i in range(1,nmaxgen+1)]
     catsmiCol   = 'all_smiles'
-    
-    genmols[catsmiCol] = genmols[predcols].apply(lambda x: (' '.join(x)).strip().split(), axis=1)
+
+    # Listed as they are rather than joined and split on whitespace: the split drops an empty
+    # candidate and shifts the later ones out of the prediction_k position the rank depends on.
+    genmols[catsmiCol] = genmols[predcols].apply(list, axis=1)
     genmols.drop(columns=predcols, inplace=True)
     
     # Split dataframe into chunks, process sequentially, and save each to disk to reduce memory usage
@@ -522,8 +512,12 @@ def sc3_check_genmol_results(
     genmoldfs = [genmols.iloc[i:i+chunk_size] for i in range(0, len(genmols), chunk_size)]
     del genmols
 
+    # The reader below concatenates every chunk_*.tsv it finds, so the chunks are written aside and
+    # swapped in only once the last one is done: a run that dies halfway must not mix runs.
     chunk_dir = f'{outfd}/chunks'
-    os.makedirs(chunk_dir, exist_ok=True)
+    tmp_dir   = f'{outfd}/chunks.tmp'
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+    os.makedirs(tmp_dir)
 
     for chunk_id, genmoldf in enumerate(tqdm(genmoldfs, desc='Processing chunks')):
         sub_chunk_size = os.cpu_count()-1
@@ -532,9 +526,12 @@ def sc3_check_genmol_results(
             delayed(evaluation_func)(sub, catsmiCol, trsmiles, nmaxgen, algorithm_name)
             for sub in sub_chunks)
         result = pd.concat(sub_results, ignore_index=True)
-        result.to_csv(f'{chunk_dir}/chunk_{chunk_id}.tsv', sep='\t')
+        result.to_csv(f'{tmp_dir}/chunk_{chunk_id}.tsv', sep='\t')
         del result
     del genmoldfs
+
+    shutil.rmtree(chunk_dir, ignore_errors=True)
+    os.rename(tmp_dir, chunk_dir)
 
     # Load all chunks from disk and combine
     chunk_files = sorted(glob(f'{chunk_dir}/chunk_*.tsv'), key=lambda x: int(x.split('_')[-1].split('.')[0]))

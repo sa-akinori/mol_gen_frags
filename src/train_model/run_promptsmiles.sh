@@ -6,7 +6,7 @@ cd "$(cd "$(dirname "$0")" && pwd)/../.." || exit 1
 
 # conda setup
 source ~/miniconda3/etc/profile.d/conda.sh
-conda activate env_promptsmiles
+conda activate promptsmiles
 
 FRAG_NAME="brics"          # "brics" or "rc_cms"
 MODE="finetuning"          # "finetuning" or "from_scratch"

@@ -30,16 +30,16 @@ pip install -e .
 ```
 ### PromptSMILES
 ```bash
-conda create -n env_promptsmiles python=3.12.12
-conda activate env_promptsmiles
+conda create -n promptsmiles python=3.12.12
+conda activate promptsmiles
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 pip install -r requirements/promptsmiles_requirements.txt
 pip install -e .
 ```
 ### FragGPT
 ```bash
-conda create -n env_fraggpt python=3.12.12
-conda activate env_fraggpt
+conda create -n fraggpt python=3.12.12
+conda activate fraggpt
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 pip install -r requirements/fraggpt_requirements.txt
 pip install -e .
@@ -50,10 +50,11 @@ pip install -e .
 | RFFMG (T5Chem) | `断片集合 >> 分子` | T5 (~14.8M) | `t5chem` |
 | RFFMG (GPT2) | `断片集合 >> 分子` | `entropy/gpt2_zinc_87m` (~87M) | `t5chem` |
 | SAFE | SAFE 文字列 | safe-gpt (~88.8M) | `safe` |
-| PromptSMILES | プレーンな SMILES + 推論時プロンプト | `entropy/gpt2_zinc_87m` | `env_promptsmiles` |
-| FragGPT | FU-SMILES（BRICS 断片に対の `[i*]` ラベル） | `entropy/gpt2_zinc_87m` | `env_fraggpt` |
+| PromptSMILES | プレーンな SMILES + 推論時プロンプト | `entropy/gpt2_zinc_87m` | `promptsmiles` |
+| FragGPT | FU-SMILES（BRICS 断片に対の `[i*]` ラベル） | `entropy/gpt2_zinc_87m` | `fraggpt` |
 
-`run_*.sh` と `gen_fraggpt.sh` はスクリプト内で環境を activate するため、どのシェルからでも実行できます。
+`run_*.sh` と `gen_*.sh` はすべてスクリプト内で環境を activate するため、どのシェルからでも実行できます。
+以下の `python src/...` のコマンドは、併記した環境で実行してください。
 
 ## 仮想環境の変更点
 ## T5Chem
@@ -174,7 +175,6 @@ SAFE・PromptSMILES・FragGPT は **`--sampling_num 5`（既定値）のとき�
 ### モデルの学習
 ```bash
 # 1. rffmgモデルの学習（T5ChemまたはGPT2）
-$ conda activate t5chem
 $ bash src/train_model/run_rffmg.sh
 # .shファイル内の MODEL_NAME/MODE/FRAG_NAME を設定してください。
 #   MODEL_NAME="t5chem": T5Chem（`t5chem train` を実行）。
@@ -182,7 +182,6 @@ $ bash src/train_model/run_rffmg.sh
 #                        MODE="from_scratch" は同一configをランダム初期化で学習します。
 
 # 2. safe-gptのファインチューニング
-$ conda activate safe
 $ bash src/train_model/run_safe.sh
 # 引数が非常に多いため.shファイルに記載済み
 # .shファイル中のrc_cmsの部分、output_dirは適切に変更してください。また、--pretrain '' とすると事前学習済みモデルなしの学習が行われます。
@@ -190,16 +189,16 @@ $ bash src/train_model/run_safe.sh
 
 # 3. PromptSMILES の prior（プレーンSMILESの言語モデル）の学習
 $ bash src/train_model/run_promptsmiles.sh
-# .sh が env_promptsmiles を activate します。FRAG_NAME/MODE は .sh 上部で設定してください。
+# FRAG_NAME/MODE は .sh 上部で設定してください。
 # prior は無条件のSMILES言語モデルで、PromptSMILES は推論時にのみプロンプトを与えます。
 # 推論時のプロンプトは非カノニカルで任意の原子から始まるため、各分子は常にランダムな根原子から
 # 書き直します。データ水増しは行わず（1分子=1系列）、ランダム化はデータセット構築時に1回だけ行います。
 
 # 4. FragGPT（FU-SMILESの言語モデル）の学習
 $ bash src/train_model/run_fraggpt.sh
-# .sh が env_fraggpt を activate します。FRAG_NAME/MODE は .sh 上部で設定してください。
-# 無条件のFU-SMILES言語モデルです。結合点の付番をランダムに置換し断片順をシャッフルします
-# （既定で有効。--no-augment で無効化）。系列数は変わりません。
+# FRAG_NAME/MODE は .sh 上部で設定してください。
+# 無条件のFU-SMILES言語モデルです。結合点の付番をランダムに置換し断片順をシャッフルします。
+# 系列数は変わりません。
 ```
 
 `MODE="finetuning"` は `entropy/gpt2_zinc_87m` を初期値に、`MODE="from_scratch"` は同一configを
@@ -216,22 +215,22 @@ EarlyStopping patience 15 / seed 42）、学習量ではなく表現の違いを
 
 ```bash
 # rffmgモデル（T5ChemまたはGPT2。.sh内のMODEL_NAMEで切替）
-$ conda activate t5chem
 $ bash src/gen_mols/gen_rffmg.sh
 
 # safe-gptモデル
-$ conda activate safe
 $ bash src/gen_mols/gen_safe.sh
 
 # PromptSMILES（行ごとに scaffold decoration / fragment linking を自動で振り分け）
-$ conda activate env_promptsmiles
 $ bash src/gen_mols/gen_promptsmiles.sh
 # FRAG_NAME/MODEL_VER/GEN_METHOD は .sh 上部で設定してください。
 # GEN_METHOD="beam" は RFFMG・SAFE と同条件、"sampling" は論文の多項サンプリングです。
+# どちらを通ったかは predictions.csv の `sampler` 列に記録されます。
+# PromptSMILES が表現できない断片集合では生成を行わず、その行は `unsupported` として
+# INVALID_SMILES のまま残ります。
 
 # FragGPT
 $ bash src/gen_mols/gen_fraggpt.sh
-# .sh が env_fraggpt を activate します。FRAG_NAME/MODEL_VER は .sh 上部で設定してください。
+# FRAG_NAME/MODEL_VER は .sh 上部で設定してください。
 # 与えた断片集合の各結合点に新しい番号を振り、モデルが FU-SMILES の続きを生成したあと、
 # [i*] の番号を照合して断片を組み立てます。
 ```
@@ -241,12 +240,32 @@ $ bash src/gen_mols/gen_fraggpt.sh
 ### 生成分子の評価
 ```bash
 $ conda activate safe
-$ python src/evaluation.py --model_name t5chem --model_ver finetuning --frag_method rc_cms --additional_path normal
-# --model_name: t5chem / gpt (RFFMG-GPT) / safe_gpt / promptsmiles / fraggpt
+$ python src/evaluation.py --repr_name rffmg --model_name gpt --model_ver finetuning --frag_method rc_cms --additional_path normal
+# --repr_name:  rffmg / safe / promptsmiles / fraggpt（表現。パスの第1階層）
+# --model_name: t5chem / gpt（表現を学習させたモデル。パスの第2階層）
 # --gen_method: beam / sampling（既定は beam。promptsmiles のみ既定が sampling）
 ```
 
+有効な `--repr_name` / `--model_name` の組み合わせ（これ以外はパーサが弾きます）:
+
+| `--repr_name` | `--model_name` | 結果のパス |
+|---------------|----------------|-----------|
+| rffmg         | t5chem         | `results/rffmg/t5chem/` |
+| rffmg         | gpt            | `results/rffmg/gpt/` |
+| safe          | gpt            | `results/safe/gpt/` |
+| promptsmiles  | gpt            | `results/promptsmiles/gpt/` |
+| fraggpt       | gpt            | `results/fraggpt/gpt/` |
+
 先に生成を実行してください。評価は `test.source` と `predictions.csv` を行番号で結合しており、
 PromptSMILES と FragGPT は `test.source` / `test.target` を生成時に書き出すためです。
+
+`src/evaluation.py` が出力する `stats.csv` は test の全行を対象とし、4手法へ同じ断片集合を要求します。
+PromptSMILES は表現できない断片集合に対しては生成を行わず、その行は `INVALID_SMILES` として0点で
+集計されます（FragGPT の組み立て失敗・SAFE のデコード失敗と同じ扱いです）。したがってこの数値は
+カバレッジを含んだものになります。
+
+どの行が生成に回らなかったかは `predictions.csv` の `sampler` 列に記録されます
+（`scaffold` / `linking` / `unsupported` / `invalid_target` / `generation_error`）。
+理由別の件数は `generation_params.txt` にあります。
 
 If you need the curated ChEMBL dataset used in this study, please feel free to contact us at [sato.akinori@naist.ac.jp] or [miyao@dsc.naist.jp].

@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Plan: 全 .sh で必要な conda 環境を activate する (2026-08-08)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; }
+  h1 { border-bottom: 2px solid #333; }
+  h2 { border-bottom: 1px solid #ccc; margin-top: 2em; }
+  .step { margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+  pre { background: #f4f4f4; padding: 0.8em; border-radius: 4px; overflow-x: auto; }
+  table { border-collapse: collapse; margin: 1em 0; width: 100%; }
+  th, td { border: 1px solid #ddd; padding: 0.4em 0.7em; text-align: left; font-size: 0.95em; }
+  th { background: #f4f4f4; }
+  .note { background: #eef6ff; border-left: 4px solid #4a90d9; padding: 0.8em 1em; margin: 1em 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plan: 全 .sh で必要な conda 環境を activate する</h1>
+  <p class="meta">Date: 2026-08-08 | Status: approved</p>
+</header>
+
+<section id="overview">
+  <h2>概要</h2>
+  <p>学習・生成の <code>.sh</code> 8本のうち、環境設定を持たないものが4本ある。実行前に手動で
+  activate する運用にしていたが、方針を変えて <strong>すべての <code>.sh</code> が自分で必要な
+  環境を activate する</strong>形に統一する。</p>
+
+  <h3>現状（実測）</h3>
+  <table>
+    <tr><th>ファイル</th><th>shebang</th><th>cd</th><th>conda activate</th><th>CUDA_VISIBLE_DEVICES</th></tr>
+    <tr><td><code>run_fraggpt.sh</code></td><td><strong>なし</strong></td><td>あり</td><td><strong>なし</strong></td><td><strong>なし</strong></td></tr>
+    <tr><td><code>run_promptsmiles.sh</code></td><td>あり</td><td>あり</td><td>promptsmiles</td><td>あり</td></tr>
+    <tr><td><code>run_rffmg.sh</code></td><td>あり</td><td>あり</td><td>t5chem</td><td>あり</td></tr>
+    <tr><td><code>run_safe.sh</code></td><td>あり</td><td>あり</td><td>safe</td><td>あり</td></tr>
+    <tr><td><code>gen_fraggpt.sh</code></td><td>あり</td><td>あり</td><td>fraggpt</td><td>あり</td></tr>
+    <tr><td><code>gen_promptsmiles.sh</code></td><td>あり</td><td><strong>なし</strong></td><td><strong>なし</strong></td><td><strong>なし</strong></td></tr>
+    <tr><td><code>gen_rffmg.sh</code></td><td>あり</td><td><strong>なし</strong></td><td><strong>なし</strong></td><td><strong>なし</strong></td></tr>
+    <tr><td><code>gen_safe.sh</code></td><td>あり</td><td><strong>なし</strong></td><td><strong>なし</strong></td><td>あり</td></tr>
+  </table>
+
+  <h3><code>gen_*.sh</code> に <code>cd</code> を入れない理由</h3>
+  <div class="note">
+    <p><code>gen_promptsmiles.sh</code> / <code>gen_rffmg.sh</code> / <code>gen_safe.sh</code> は
+    <code>SCRIPT_DIR="$(cd "$(dirname "$0")" &amp;&amp; pwd)"</code> を定義して
+    <code>${SCRIPT_DIR}/gen_*.py</code> を呼ぶ方式で、<strong>cwd に依存しない</strong>。
+    加えて4環境すべてに <code>__editable__.func-0.1.0.pth</code> が入っており
+    <code>func</code> パッケージが editable install されているため、
+    <code>from func.utility import ...</code> も cwd に関係なく解決する。実測でも
+    <code>/tmp</code> から <code>python .../gen_rffmg.py --help</code> が通る。</p>
+    <p>したがって <strong><code>SCRIPT_DIR</code> 方式を維持し、<code>cd</code> は追加しない</strong>
+    （ユーザー判断）。</p>
+  </div>
+
+  <h3>スコープ外</h3>
+  <ul>
+    <li><code>conda activate</code> の失敗検査（<code>|| exit 1</code>）— ユーザー判断で追加しない</li>
+    <li><code>gen_fraggpt.sh</code> の <code>cd</code> 方式を <code>SCRIPT_DIR</code> 方式に
+      変える作業（現状で動いているため触らない）</li>
+    <li><code>requirements/promptsmiles_requirements.txt</code> への <code>joblib</code> 追加
+      — ユーザーが別途対応</li>
+  </ul>
+</section>
+
+<section id="plan">
+  <h2>実装計画</h2>
+  <ol>
+    <article class="step" data-step="1">
+      <li>
+        <h3>Step 1: <code>run_fraggpt.sh</code> を他の <code>run_*.sh</code> と同形にする</h3>
+        <p><strong>対象ファイル:</strong> <code>src/train_model/run_fraggpt.sh</code></p>
+        <ul>
+          <li>先頭に以下を追加する。<code>run_promptsmiles.sh</code> / <code>run_rffmg.sh</code> /
+            <code>run_safe.sh</code> と<strong>同じ順序・同じコメント文言</strong>に揃えること。
+            <pre><code>#!/usr/bin/env bash
+export CUDA_VISIBLE_DEVICES=0
+
+# リポジトリルートに移動（どこから実行しても相対パスが解決できるようにする）
+cd "$(cd "$(dirname "$0")" &amp;&amp; pwd)/../.." || exit 1
+
+# conda setup
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate fraggpt</code></pre></li>
+          <li><code>cd</code> の行は既にあるので重複させないこと。位置だけ他3本に合わせる。</li>
+          <li><code>FRAG_NAME</code> / <code>MODE</code> / <code>WANDB_*</code> / python 実行部は
+            変更しない。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="2">
+      <li>
+        <h3>Step 2: <code>gen_*.sh</code> 3本に環境設定を追加する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_mols/gen_promptsmiles.sh</code>,
+          <code>src/gen_mols/gen_rffmg.sh</code>, <code>src/gen_mols/gen_safe.sh</code></p>
+        <ul>
+          <li>各ファイルの <code>SCRIPT_DIR</code> 定義の<strong>前</strong>に以下を追加する。
+            <pre><code>export CUDA_VISIBLE_DEVICES=0
+
+# conda setup
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate &lt;env&gt;</code></pre></li>
+          <li><code>&lt;env&gt;</code> は <code>gen_promptsmiles.sh</code> →
+            <code>promptsmiles</code>、<code>gen_rffmg.sh</code> → <code>t5chem</code>、
+            <code>gen_safe.sh</code> → <code>safe</code>。<strong>実在する環境名</strong>
+            （<code>conda env list</code> で確認済み）。</li>
+          <li><code>gen_safe.sh</code> は既に <code>export CUDA_VISIBLE_DEVICES=0</code> を
+            持つので重複させないこと。</li>
+          <li><strong><code>SCRIPT_DIR</code> はそのまま残し、<code>cd</code> は追加しない</strong>
+            （概要参照）。</li>
+          <li><code>FRAG_NAME</code> などの設定変数と python 実行部は変更しない。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="3">
+      <li>
+        <h3>Step 3: README の記述を戻す</h3>
+        <p><strong>対象ファイル:</strong> <code>README.md</code>, <code>README_ja.md</code></p>
+        <ul>
+          <li>直前に追加した
+            <code>$ conda activate fraggpt   # the .sh does not activate it</code> /
+            <code>$ conda activate fraggpt   # .sh は activate しません</code> の行を削除する。</li>
+          <li>その下の <code># Set FRAG_NAME/MODE at the top of the .sh.</code> /
+            <code># FRAG_NAME/MODE は .sh 上部で設定してください。</code> を、他手法と同じ
+            <code># The .sh activates fraggpt itself. Set FRAG_NAME/MODE at the top of the .sh.</code> /
+            <code># .sh が fraggpt を activate します。FRAG_NAME/MODE は .sh 上部で設定してください。</code>
+            に戻す。</li>
+          <li><strong>存在しない <code>--no-augment</code> の記述を復活させないこと</strong>
+            （同日に削除済み）。</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 1 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="4">
+      <li>
+        <h3>Step 4: 検証（メインエージェントが実施）</h3>
+        <p><strong>対象ファイル:</strong> 実行のみ（コード変更なし）</p>
+        <ul>
+          <li>8本すべてに shebang / <code>conda activate</code> /
+            <code>CUDA_VISIBLE_DEVICES</code> が揃うこと（<code>cd</code> は
+            <code>run_*.sh</code> 4本 + <code>gen_fraggpt.sh</code> のみ）</li>
+          <li>各 <code>.sh</code> が activate する環境が実在すること（<code>conda env list</code> と照合）</li>
+          <li>全8本の <code>bash -n</code></li>
+          <li><strong>リポジトリルート以外から実行してもパスが解決すること。</strong>
+            学習・生成を起動せずに確認すること（<code>gen_*.sh</code> は <code>--help</code> を
+            付けた形で試す、<code>run_*.sh</code> は python 実行行を読み替えて確認するなど）</li>
+          <li><code>grep -rn "env_promptsmiles\|env_fraggpt"</code> が0件のままであること</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 3 の後</p>
+      </li>
+    </article>
+  </ol>
+</section>
+</body>
+</html>

@@ -175,32 +175,29 @@ def plot_fragment_validity(
     plt.grid(True, alpha=0.3)
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
 
-def spec_cond_frags(
-    frags:str
-    ):
-    if len(frags.split('.')) == 1:
-        return True
-    
-    elif len(frags.split('.')) > 2:
-        return False
-    
-    else:
-        frags = frags.split('.')
-        return all([True if frag.count('*')==1 else False for frag in frags])
-        
 if __name__ == "__main__":
     # Settings
-    arc_name = 'safe_gpt'
-    str_name = 'safe' if arc_name=='safe_gpt' else 'rffmg' # safe, rffmg
-    model_name   = 'trained' # pretrained, trained
-    slice_method = 'brics' # brics, rc_cms
-    gen_method   = 'beam'
-    
+    # The representation and the model are two independent axes, matching the layout
+    # written by evaluation.py: results/{repr_name}/{model_name}/{model_ver}/...
+    repr_name    = 'safe' # ['rffmg', 'safe', 'promptsmiles', 'fraggpt']
+    model_name   = 'gpt' # ['t5chem', 'gpt']
+    model_ver    = 'finetuning' # ['pretrained', 'finetuning', 'from_scratch']
+    frag_method  = 'brics' # ['rc_cms', 'brics']
+    gen_method   = 'beam' # ['beam', 'sampling']
+    sampling_num = 5 # [5, 10]
+    additional_path = 'normal' # ['normal', 'dup_frags', 'frag_num', 'frag_order', 'attach_point_num']
+    # RFFMG keeps its data and results under a {N}times_sampling segment (the number of
+    # fragmentation patterns per molecule); the other representations have no such segment.
+    sampling_seg = f'{sampling_num}times_sampling/' if repr_name == 'rffmg' else ''
+    result_dir   = f'{BASEPATH}/results/{repr_name}/{model_name}/{model_ver}/{frag_method}/{sampling_seg}{gen_method}/{additional_path}'
+    # The figures path keeps the condition segment out, because it differs between blocks.
+    path_prefix  = f'{repr_name}/{model_name}/{model_ver}/{frag_method}/{sampling_seg}{gen_method}'
+
     if 0:
         # Paths
-        predictions_path = f'{BASEPATH}/results/{arc_name}/{model_name}/{str_name}/{slice_method}/{gen_method}/predictions.csv'
-        properties_path = f'{BASEPATH}/results/{arc_name}/{model_name}/{str_name}/{slice_method}/{gen_method}/physic_property.csv'
-        output_dir = f'{BASEPATH}/results/{arc_name}/{model_name}/{str_name}/{slice_method}/{gen_method}/analysis'
+        predictions_path = f'{result_dir}/predictions.csv'
+        properties_path = f'{result_dir}/physic_property.csv'
+        output_dir = f'{result_dir}/analysis'
         
         # Extract min/max properties for all rows
         results_df = extract_minmax_properties(predictions_path, properties_path, output_dir)
@@ -211,74 +208,32 @@ if __name__ == "__main__":
         
     if 0:
         # validratio, uniqueratio, validfragratio, novelratio, SAscores, tanimoto_sim
-        curated_df = pd.read_csv(f'{BASEPATH}/results/{arc_name}/{model_name}/{str_name}/{slice_method}/{gen_method}/curated_data.tsv', sep='\t', index_col=0)
-        
+        curated_df = pd.read_csv(f'{result_dir}/curated_data.tsv', sep='\t', index_col=0)
+
         # Calculate fragment statistics for all data
         curated_df['mean_SAscores'] = curated_df['SAscores'].apply(lambda x: sum(ast.literal_eval(x))/len(ast.literal_eval(x)) if len(ast.literal_eval(x)) else 0)
         curated_df['n_fragments']   = curated_df['fragment'].apply(lambda x: len(x.split('.')))
         curated_df['n_wildcards']   = curated_df['fragment'].apply(lambda x: x.count('*'))
         curated_df['fragment_size'] = curated_df['fragment'].apply(lambda x: len(x.replace('.', '').replace('*', '')))
         
+        fig_dir = f'{BASEPATH}/figures/frag_feat_vs_prop/{path_prefix}/{additional_path}'
         for y_axis in ['validratio', 'uniqueratio', 'validfragratio', 'novelratio', 'mean_SAscores', 'tanimoto_sim']:
-            
+
             # Plot different combinations
-            os.makedirs(f'{BASEPATH}/figures/frag_feat_vs_prop/{arc_name}/{model_name}/{str_name}/{slice_method}/{gen_method}/n_fragments', exist_ok=True)
-            os.makedirs(f'{BASEPATH}/figures/frag_feat_vs_prop/{arc_name}/{model_name}/{str_name}/{slice_method}/{gen_method}/n_wildcards', exist_ok=True)
-            os.makedirs(f'{BASEPATH}/figures/frag_feat_vs_prop/{arc_name}/{model_name}/{str_name}/{slice_method}/{gen_method}/fragment_size', exist_ok=True)
-            plot_fragment_validity(df=curated_df, x_axis='n_fragments', y_axis=y_axis, save_path=f'{BASEPATH}/figures/frag_feat_vs_prop/{arc_name}/{model_name}/{str_name}/{slice_method}/{gen_method}/n_fragments/{y_axis}.png')
-            plot_fragment_validity(df=curated_df, x_axis='n_wildcards', y_axis=y_axis, save_path=f'{BASEPATH}/figures/frag_feat_vs_prop/{arc_name}/{model_name}/{str_name}/{slice_method}/{gen_method}/n_wildcards/{y_axis}.png')
-            plot_fragment_validity(df=curated_df, x_axis='fragment_size', y_axis=y_axis, save_path=f'{BASEPATH}/figures/frag_feat_vs_prop/{arc_name}/{model_name}/{str_name}/{slice_method}/{gen_method}/fragment_size/{y_axis}.png')
+            os.makedirs(f'{fig_dir}/n_fragments', exist_ok=True)
+            os.makedirs(f'{fig_dir}/n_wildcards', exist_ok=True)
+            os.makedirs(f'{fig_dir}/fragment_size', exist_ok=True)
+            plot_fragment_validity(df=curated_df, x_axis='n_fragments', y_axis=y_axis, save_path=f'{fig_dir}/n_fragments/{y_axis}.png')
+            plot_fragment_validity(df=curated_df, x_axis='n_wildcards', y_axis=y_axis, save_path=f'{fig_dir}/n_wildcards/{y_axis}.png')
+            plot_fragment_validity(df=curated_df, x_axis='fragment_size', y_axis=y_axis, save_path=f'{fig_dir}/fragment_size/{y_axis}.png')
             
-    if 1:
-        # Difference in generation accuracy between cases that satisfy the condition and those that do not (Condition: Input is one fragment with multiple attachment points or two fragments with one attachment point each)
-        curated_df = pd.read_csv(f'{BASEPATH}/results/{arc_name}/{model_name}/{str_name}/{slice_method}/{gen_method}/normal/curated_data.tsv', sep='\t', index_col=0)
-        spec_cond_bool  = [spec_cond_frags(f) for f in curated_df['fragment']]
-        spec_cond_df    = curated_df[spec_cond_bool].reset_index(drop=True)
-        no_spec_cond_df = curated_df[~np.array(spec_cond_bool)].reset_index(drop=True)
-        print(curated_df.shape, spec_cond_df.shape, no_spec_cond_df.shape)
-        
-        # Summary of generation accuracy when the condition is satisfied
-        spec_stats = dict()
-        spec_stats['avg_validity']         = spec_cond_df['validratio'].mean() 
-        spec_stats['std_validity']         = spec_cond_df['validratio'].std() 
-        spec_stats['avg_validity_onfrags'] = spec_cond_df['validfragratio'].mean() # unique fragments should be used and count should be reflected.
-        spec_stats['std_validity_onfrags'] = spec_cond_df['validfragratio'].std()
-        spec_stats['avg_uniqueness']       = spec_cond_df['uniqueratio'].mean()
-        spec_stats['std_uniqueness']       = spec_cond_df['uniqueratio'].std()
-        spec_stats['avg_novelty']          = spec_cond_df['novelratio'].mean()
-        spec_stats['std_novelty']          = spec_cond_df['novelratio'].std()
-        # 
-        spec_stats['avg_tanimoto_sim']     = spec_cond_df[spec_cond_df['nnovel'] != 0]['tanimoto_sim'].mean()
-        spec_stats['std_tanimoto_sim']     = spec_cond_df[spec_cond_df['nnovel'] != 0]['tanimoto_sim'].std()
-        spec_stats['avg_rediscovery']      = spec_cond_df[spec_cond_df['nnovel'] != 0]['rank'].apply(lambda x: 0 if x == 0 else 1).mean()
-        spec_stats['std_rediscovery']      = spec_cond_df[spec_cond_df['nnovel'] != 0]['rank'].apply(lambda x: 0 if x == 0 else 1).std()
-        spec_stats_df = pd.Series(spec_stats)
-        spec_stats_df.to_csv(f'{BASEPATH}/results/{arc_name}/{model_name}/{str_name}/{slice_method}/{gen_method}/normal/spec_stats.csv')
-        
-        # Summary of generation accuracy when the condition is not satisfied
-        no_spec_stats = dict()
-        no_spec_stats['avg_validity']         = no_spec_cond_df['validratio'].mean() 
-        no_spec_stats['std_validity']         = no_spec_cond_df['validratio'].std() 
-        no_spec_stats['avg_validity_onfrags'] = no_spec_cond_df['validfragratio'].mean() # unique fragments should be used and count should be reflected.
-        no_spec_stats['std_validity_onfrags'] = no_spec_cond_df['validfragratio'].std()
-        no_spec_stats['avg_uniqueness']       = no_spec_cond_df['uniqueratio'].mean()
-        no_spec_stats['std_uniqueness']       = no_spec_cond_df['uniqueratio'].std()
-        no_spec_stats['avg_novelty']          = no_spec_cond_df['novelratio'].mean()
-        no_spec_stats['std_novelty']          = no_spec_cond_df['novelratio'].std()
-        # 
-        no_spec_stats['avg_tanimoto_sim']     = no_spec_cond_df[no_spec_cond_df['nnovel'] != 0]['tanimoto_sim'].mean()
-        no_spec_stats['std_tanimoto_sim']     = no_spec_cond_df[no_spec_cond_df['nnovel'] != 0]['tanimoto_sim'].std()
-        no_spec_stats['avg_rediscovery']      = no_spec_cond_df[no_spec_cond_df['nnovel'] != 0]['rank'].apply(lambda x: 0 if x == 0 else 1).mean()
-        no_spec_stats['std_rediscovery']      = no_spec_cond_df[no_spec_cond_df['nnovel'] != 0]['rank'].apply(lambda x: 0 if x == 0 else 1).std()
-        no_spec_stats_df = pd.Series(no_spec_stats)
-        no_spec_stats_df.to_csv(f'{BASEPATH}/results/{arc_name}/{model_name}/{str_name}/{slice_method}/{gen_method}/normal/no_spec_stats.csv')
-        
     if 0:
         const_name = 'dup_frags' # ['attach_point_num', 'dup_frags', 'frag_num']
         
         # Verification of why the generation accuracy is poor with respect to the number of fragments (Is the input fragment larger than the training data because it is randomly selected from unique fragments?)
-        train_df   = pd.read_csv(f'{BASEPATH}/data/{str_name}/{slice_method}/normal/train.source', sep='\t', header=None, names=['smiles'])
-        curated_df = pd.read_csv(f'{BASEPATH}/data/{str_name}/{slice_method}/{const_name}/test.source', sep='\t', header=None, names=['smiles'])
+        data_dir   = f'{BASEPATH}/data/{repr_name}/{frag_method}/{sampling_seg}'
+        train_df   = pd.read_csv(f'{data_dir}normal/train.source', sep='\t', header=None, names=['smiles'])
+        curated_df = pd.read_csv(f'{data_dir}{const_name}/test.source', sep='\t', header=None, names=['smiles'])
         train_df['smi_length'] = train_df['smiles'].apply(len)
         train_df['n_frags']    = train_df['smiles'].apply(lambda smi: len(smi.split('.')))
         curated_df['smi_length'] = curated_df['smiles'].apply(len)
@@ -299,6 +254,7 @@ if __name__ == "__main__":
         plt.title('Distribution of SMILES length by number of fragments', fontsize=14)
         plt.legend(title='Dataset', loc='upper left')
         plt.tight_layout()
-        os.makedirs(f'{BASEPATH}/figures/smiles_length/{str_name}/{slice_method}', exist_ok=True)
-        plt.savefig(f'{BASEPATH}/figures/smiles_length/{str_name}/{slice_method}/{const_name}.png')
+        smiles_length_dir = f'{BASEPATH}/figures/smiles_length/{repr_name}/{frag_method}/{sampling_seg}'
+        os.makedirs(smiles_length_dir, exist_ok=True)
+        plt.savefig(f'{smiles_length_dir}{const_name}.png')
         

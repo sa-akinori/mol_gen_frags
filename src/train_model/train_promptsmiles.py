@@ -1,4 +1,6 @@
 import argparse
+import hashlib
+import inspect
 import os
 
 import datasets
@@ -23,6 +25,7 @@ def encode_smiles(
     idx: int,
     tokenizer: PreTrainedTokenizerBase,
     seed: int,
+    code_version: str,
 ) -> dict[str, list[int]]:
     """Rewrite one molecule from a random root atom and tokenize it as ``<bos> SMILES <eos>``.
 
@@ -34,16 +37,25 @@ def encode_smiles(
         idx: Index of the row within its split.
         tokenizer: Tokenizer of the model being trained.
         seed: Base random seed of the run.
+        code_version: Hash of the randomization source, unused by the body. datasets hashes a
+            mapped function by its name only, so editing the randomization code does not
+            invalidate the cache; passing the hash through ``fn_kwargs`` puts the code into
+            the fingerprint.
 
     Returns:
         Dict with the single key ``input_ids`` (``list[int]``).
     """
-    # The seed is derived per row instead of from a shared generator: .map(num_proc=N) runs in
-    # separate processes, so only a row-derived seed makes the randomization depend on --seed
-    # alone and not on num_proc. The +1 keeps it non-zero, which RDKit reads as "unseeded".
+    # .map(num_proc=N) runs in separate processes, so the seed is derived per row: a shared
+    # generator would make the randomization depend on num_proc as well as on --seed.
+    # The +1 keeps the seed non-zero, which RDKit reads as "unseeded".
     smiles = RandomizeSMILES(example["smiles"], seed + idx + 1)[0]
     token_ids = tokenizer(smiles, add_special_tokens=False)["input_ids"]
     return {"input_ids": [tokenizer.bos_token_id] + token_ids + [tokenizer.eos_token_id]}
+
+
+CODE_VERSION = hashlib.sha1(
+    (inspect.getsource(encode_smiles) + inspect.getsource(RandomizeSMILES)).encode()
+).hexdigest()[:12]
 
 
 def build_lm_dataset(
@@ -77,7 +89,7 @@ def build_lm_dataset(
         with_indices=True,
         num_proc=num_proc,
         remove_columns=split.column_names,
-        fn_kwargs={"tokenizer": tokenizer, "seed": seed},
+        fn_kwargs={"tokenizer": tokenizer, "seed": seed, "code_version": CODE_VERSION},
         desc=f"tokenizing {split_name}",
     )
     kept = encoded.filter(
@@ -104,8 +116,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_length", type=int, default=256, help="Maximum sequence length (default: 256)")
     parser.add_argument("--num_proc", type=int, default=max(1, (os.cpu_count() or 2) - 1), help="Worker processes used to tokenize the dataset (default: number of CPUs - 1)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed (default: 42)")
-    parser.add_argument("--eval_strategy", type=str, default="steps", help="Evaluation strategy (default: steps)")
-    parser.add_argument("--save_strategy", type=str, default="steps", help="Save strategy (default: steps)")
+    parser.add_argument("--eval_strategy", type=str, default="steps", choices=["steps", "epoch"], help="Evaluation strategy (default: steps)")
+    parser.add_argument("--save_strategy", type=str, default="steps", choices=["steps", "epoch"], help="Save strategy (default: steps)")
+    parser.add_argument("--resume_from_checkpoint", type=str, default=None, help="Checkpoint directory to resume from, or 'auto' for the latest one in output_dir (default: start from scratch)")
 
     return parser.parse_args()
 
@@ -114,7 +127,6 @@ if __name__ == "__main__":
     args = parse_args()
     set_seed(args.seed)
 
-    # Model: finetune from pretrained weights or reinitialize the same config.
     pretrained_model = "entropy/gpt2_zinc_87m"
     tokenizer = AutoTokenizer.from_pretrained(pretrained_model)
     if args.mode == "finetuning":
@@ -131,7 +143,6 @@ if __name__ == "__main__":
     logfp.write(f"args: {vars(args)}")
     logfp.write(f"pretrained_model: {pretrained_model}")
 
-    # Datasets
     dataset = datasets.load_from_disk(f"{BASEPATH}/data/promptsmiles/{args.frag_method}/normal")
     train_dataset = build_lm_dataset(dataset["train"], "train", tokenizer, args.max_length, args.seed, args.num_proc, logfp)
     val_dataset   = build_lm_dataset(dataset["validation"], "validation", tokenizer, args.max_length, args.seed, args.num_proc, logfp)
@@ -163,7 +174,9 @@ if __name__ == "__main__":
         data_collator=DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False),
         callbacks=[EarlyStoppingCallback(early_stopping_patience=15)],
     )
-    trainer.train()
+    # save_total_limit deletes checkpoints in ascending step order, so a fresh run started in a
+    # directory holding high-numbered checkpoints of an older run deletes its own new ones first.
+    trainer.train(resume_from_checkpoint=True if args.resume_from_checkpoint == "auto" else args.resume_from_checkpoint)
 
     best_model_dir = f"{output_dir}/best_model"
     trainer.save_model(best_model_dir)

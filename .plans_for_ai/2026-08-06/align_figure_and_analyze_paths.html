@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Plan: align_figure_and_analyze_paths (2026-08-06)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; }
+  h1 { border-bottom: 2px solid #333; }
+  .step { margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+  pre { background: #f4f4f4; padding: 0.8em; border-radius: 4px; overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; font-size: 0.92em; }
+  th, td { border: 1px solid #ddd; padding: 0.4em 0.6em; text-align: left; vertical-align: top; }
+  th { background: #f4f4f4; }
+  .out { background: #fff8e1; border-left: 4px solid #f0ad4e; padding: 0.6em 1em; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plan: align_figure_and_analyze_paths</h1>
+  <p class="meta">Date: 2026-08-06 | Status: pending-approval</p>
+</header>
+
+<section id="overview">
+  <h2>概要</h2>
+  <p><code>src/figure.py</code> と <code>src/analyze_predictions.py</code> に、<code>evaluation.py</code> で
+  解消したのと同じ「手法(表現)軸とモデル軸の混同」が残っている。加えて両者とも結果パスが
+  現在の出力レイアウトと合っていない。</p>
+  <p>両ファイルを <code>evaluation.py</code> と同じ 2 軸の語彙 (<code>repr_name</code> /
+  <code>model_name</code>) に揃え、パス組み立てを現在のレイアウトに合わせる。</p>
+
+  <h3>現状の問題 — <code>src/figure.py:167-180</code></h3>
+  <table>
+    <tr><th>行</th><th>問題</th></tr>
+    <tr><td>171-173</td><td><code>arc_name = 't5chem' # ['t5chem','safe_gpt','gpt']</code> から <code>str_name</code> / <code>model_dir</code> を派生 (evaluation.py と同じ混同)</td></tr>
+    <tr><td>174</td><td>変数名 <code>model_name</code> に <code>'trained'</code> (= model_ver) が入っている。しかも <code>trained</code> は <code>from_scratch</code> の旧称</td></tr>
+    <tr><td>176</td><td><code>path_prefix</code> の階層順 <code>{手法}/{モデル}/{ver}</code> 自体は正しいが、rffmg の <code>{N}times_sampling</code> が無い</td></tr>
+    <tr><td>177</td><td><code>slice_method</code> は <code>evaluation.py</code> の <code>frag_method</code> と同じもの。名前が揃っていない</td></tr>
+    <tr><td>178</td><td><code>gen_method</code> のコメントが <code>['beam', 'random']</code>。実際の選択肢は <code>beam</code> / <code>sampling</code></td></tr>
+    <tr><td>193-371</td><td>同じ長い f-string が 20 箇所以上に重複。<code>additional_path</code> は <code>normal</code> 決め打ちで変数化されていない</td></tr>
+    <tr><td>344,347,349</td><td><code>data/{str_name}/{slice_method}/normal/train.source</code> — rffmg の <code>{N}times_sampling</code> が無い</td></tr>
+  </table>
+
+  <h3>現状の問題 — <code>src/analyze_predictions.py:193-197</code></h3>
+  <table>
+    <tr><th>行</th><th>問題</th></tr>
+    <tr><td>193-194</td><td><code>arc_name = 'safe_gpt'</code> から <code>str_name</code> を派生 (同じ混同)</td></tr>
+    <tr><td>195</td><td>変数名 <code>model_name</code> に <code>'trained'</code> (= model_ver) が入っている</td></tr>
+    <tr><td>201-230</td><td>パスが <code>results/{arc_name}/{model_name}/{str_name}/{frag}/{gen}/...</code>。<strong>手法が 2 回出てきており、階層順も現在のレイアウトと違う</strong>。正しくは <code>results/{repr_name}/{model_name}/{model_ver}/{frag_method}/[{sampling}/]{gen_method}/{additional_path}/</code></td></tr>
+    <tr><td>201-230</td><td><code>if 0:</code> ブロックでは <code>{additional_path}</code> セグメント自体が欠けている (<code>if 1:</code> ブロックの 234/256/274 にはある)</td></tr>
+    <tr><td>280-281</td><td><code>data/{str_name}/{slice_method}/...</code> — rffmg の <code>{N}times_sampling</code> が無い</td></tr>
+  </table>
+
+  <h3>揃える先 (evaluation.py と同じ語彙)</h3>
+<pre><code>repr_name    = 'rffmg'       # ['rffmg', 'safe', 'promptsmiles', 'fraggpt']
+model_name   = 't5chem'      # ['t5chem', 'gpt']
+model_ver    = 'finetuning'  # ['pretrained', 'finetuning', 'from_scratch']
+frag_method  = 'brics'       # ['brics', 'rc_cms']
+gen_method   = 'beam'        # ['beam', 'sampling']
+sampling_num = 5             # [5, 10] rffmg のみ
+additional_path = 'normal'   # ['normal', 'dup_frags', 'frag_num', 'frag_order', 'attach_point_num']
+sampling_seg = f'{sampling_num}times_sampling/' if repr_name == 'rffmg' else ''</code></pre>
+
+  <h3>設計判断</h3>
+  <ul>
+    <li><strong>argparse 化はしない。</strong> 両ファイルは <code>if 0:</code> / <code>if 1:</code> で実行ブロックを
+      切り替える現行スタイルを維持し、設定ブロックの変数名とパス組み立てだけを直す。</li>
+    <li><strong>長い f-string の重複は共通変数に集約する。</strong> <code>result_dir</code> (results 側) と
+      <code>path_prefix</code> (figures 側) を設定ブロックで 1 度だけ組み立て、各ブロックはそれを使う。
+      20 箇所以上の重複が消え、今後レイアウトが変わったときの修正漏れもなくなる。</li>
+  </ul>
+</section>
+
+<section id="plan">
+  <h2>実装計画</h2>
+  <ol>
+    <article class="step" data-step="1">
+      <li>
+        <h3>Step 1: <code>figure.py</code> の設定ブロックを 2 軸に書き換え</h3>
+        <p><strong>対象ファイル:</strong> <code>src/figure.py</code></p>
+        <p><strong>変更内容:</strong> <code>figure.py:170-179</code> を上記「揃える先」の変数群に置き換える。</p>
+        <ul>
+          <li><code>arc_name</code> / <code>str_name</code> / <code>model_dir</code> を廃止し、
+            <code>repr_name</code> / <code>model_name</code> を直接指定する。</li>
+          <li><code>model_name = 'trained'</code> を <code>model_ver = 'finetuning'</code> にリネームする
+            (選択肢コメントから旧称 <code>trained</code> を外し、<code>pretrained</code> / <code>finetuning</code> /
+            <code>from_scratch</code> にする)。</li>
+          <li><code>slice_method</code> を <code>frag_method</code> にリネームする (<code>evaluation.py</code> と同名)。</li>
+          <li><code>gen_method</code> のコメントを <code>['beam', 'sampling']</code> に直す。</li>
+          <li><code>sampling_num</code> と <code>additional_path</code> を新設する。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="2">
+      <li>
+        <h3>Step 2: <code>figure.py</code> のパス組み立てを共通変数に集約</h3>
+        <p><strong>対象ファイル:</strong> <code>src/figure.py</code></p>
+        <p><strong>変更内容:</strong></p>
+        <ul>
+          <li>設定ブロックで <code>sampling_seg</code> と、以下 2 つの共通プレフィックスを組み立てる。
+            <ul>
+              <li><code>result_dir = f'{fd}/results/{repr_name}/{model_name}/{model_ver}/{frag_method}/{sampling_seg}{gen_method}/{additional_path}'</code></li>
+              <li><code>path_prefix = f'{repr_name}/{model_name}/{model_ver}/{frag_method}/{sampling_seg}{gen_method}'</code>
+                (figures 側は末尾の条件セグメントがブロックごとに違うため、<code>additional_path</code> は含めない)</li>
+            </ul>
+          </li>
+          <li><code>figure.py:193-371</code> の各パスを、上の 2 変数を使った形に置き換える。
+            <code>f'{fd}/results/{path_prefix}/{slice_method}/{gen_method}/normal/...'</code> のような重複記述をなくす。</li>
+          <li><code>const_name</code> を使うブロック (315, 322) は <code>path_prefix</code> + <code>{const_name}</code> で
+            組み立てる (<code>additional_path</code> とは別のループ変数なのでそのまま残す)。</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 1 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="3">
+      <li>
+        <h3>Step 3: <code>figure.py</code> の <code>data/</code> 参照を修正</h3>
+        <p><strong>対象ファイル:</strong> <code>src/figure.py</code></p>
+        <p><strong>変更内容:</strong> <code>figure.py:344,347,349</code> の
+        <code>data/{str_name}/{slice_method}/...</code> を
+        <code>data/{repr_name}/{frag_method}/{sampling_seg}...</code> に直す
+        (<code>train.source</code> は <code>data/rffmg/{frag}/{N}times_sampling/normal/train.source</code> に
+        実在することを確認済み)。</p>
+        <p><strong>依存関係:</strong> Step 1 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="4">
+      <li>
+        <h3>Step 4: <code>analyze_predictions.py</code> の設定ブロックを 2 軸に書き換え</h3>
+        <p><strong>対象ファイル:</strong> <code>src/analyze_predictions.py</code></p>
+        <p><strong>変更内容:</strong> <code>analyze_predictions.py:193-197</code> を Step 1 と同じ変数群に置き換える
+        (<code>arc_name</code> / <code>str_name</code> を廃止、<code>model_name</code> → <code>model_ver</code> の
+        リネーム、<code>slice_method</code> → <code>frag_method</code>、<code>sampling_num</code> /
+        <code>additional_path</code> の新設)。</p>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="5">
+      <li>
+        <h3>Step 5: <code>analyze_predictions.py</code> のパス階層順を修正</h3>
+        <p><strong>対象ファイル:</strong> <code>src/analyze_predictions.py</code></p>
+        <p><strong>変更内容:</strong></p>
+        <ul>
+          <li>設定ブロックで <code>result_dir</code> (Step 2 と同じ組み立て) と figures 用の
+            <code>path_prefix</code> を作る。</li>
+          <li><code>analyze_predictions.py:201-274</code> のパスを <code>result_dir</code> ベースに置き換える。
+            これにより<strong>手法が 2 回出る問題・階層順の誤り・<code>{additional_path}</code> の欠落</strong>が
+            同時に解消する。</li>
+          <li><code>analyze_predictions.py:225-230,302-303</code> の <code>figures/</code> 側パスも
+            <code>path_prefix</code> ベースに揃える。</li>
+          <li><code>analyze_predictions.py:280-281</code> の <code>data/{str_name}/{slice_method}/...</code> を
+            <code>data/{repr_name}/{frag_method}/{sampling_seg}...</code> に直す。</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 4 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="6">
+      <li>
+        <h3>Step 6: 検証</h3>
+        <p><strong>対象ファイル:</strong> なし (検証のみ)</p>
+        <p><strong>変更内容:</strong></p>
+        <ul>
+          <li><code>python -m py_compile</code> で両ファイルの構文を確認する。</li>
+          <li>設定ブロックだけを切り出して、<code>result_dir</code> が <code>evaluation.py</code> の
+            <code>outfd</code> と文字列として一致することを 5 組み合わせすべてで確認する
+            (<code>rffmg × {t5chem, gpt}</code>, <code>{safe, promptsmiles, fraggpt} × gpt</code>)。</li>
+          <li>rffmg については <code>result_dir</code> 配下の <code>predictions.csv</code> /
+            <code>curated_data.tsv</code> が実在することを確認する。</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 5 の後</p>
+      </li>
+    </article>
+  </ol>
+</section>
+
+<section id="notes">
+  <h2>実装対象外・報告のみ</h2>
+  <ul>
+    <li class="out"><strong>既存の <code>figures/</code> は再生成が必要。</strong> 現在の
+      <code>figures/physic_property/safe_gpt/trained/</code> などは <code>{arc_name}/{model_ver}/</code> の 2 段で、
+      今回揃える 5 段のレイアウトとは別物。今回の変更で自動的には移動されない。</li>
+    <li><strong><code>figure.py:304</code> の <code>data/dummy/{frag}/{const_name}/target_frags.pkl</code> は
+      存在しないディレクトリを参照している</strong> (<code>if 0:</code> ブロック内)。軸の混同とは別問題なので
+      今回は触らない。</li>
+    <li>両ファイルとも <code>if 0:</code> / <code>if 1:</code> で実行ブロックを切り替える設計のままにする。
+      argparse 化はしない。</li>
+  </ul>
+</section>
+</body>
+</html>

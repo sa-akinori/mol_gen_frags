@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Plan: SAFE / PromptSMILES のレビュー指摘を修正する (2026-08-08)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; }
+  h1 { border-bottom: 2px solid #333; }
+  h2 { border-bottom: 1px solid #ccc; margin-top: 2em; }
+  .step { margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+  pre { background: #f4f4f4; padding: 0.8em; border-radius: 4px; overflow-x: auto; }
+  table { border-collapse: collapse; margin: 1em 0; width: 100%; }
+  th, td { border: 1px solid #ddd; padding: 0.4em 0.7em; text-align: left; font-size: 0.95em; }
+  th { background: #f4f4f4; }
+  .warn { background: #fff3f3; border-left: 4px solid #d9534f; padding: 0.8em 1em; margin: 1em 0; }
+  .note { background: #eef6ff; border-left: 4px solid #4a90d9; padding: 0.8em 1em; margin: 1em 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plan: SAFE / PromptSMILES のレビュー指摘を修正する</h1>
+  <p class="meta">Date: 2026-08-08 | Status: approved</p>
+</header>
+
+<section id="overview">
+  <h2>概要</h2>
+  <p>SAFE と PromptSMILES を検証エージェントに確認させ、22件の指摘を得た。ユーザーと1件ずつ
+  突き合わせた結果、<strong>5件を修正</strong>、残りは対応不要と決定した。</p>
+  <div class="warn">
+    <p>うち1件（Step 1）は、同日の <code>address_review_findings.md</code> の Step 18 で
+    私が入れた<strong>回帰</strong>である。</p>
+  </div>
+
+  <h3>対応不要と決めたもの（判断の理由つき）</h3>
+  <table>
+    <tr><th>指摘</th><th>対応しない理由</th></tr>
+    <tr><td>SAFE の学習到達 epoch が 9.3〜23.2 でばらつく</td>
+      <td><strong>EarlyStopping(patience=15) の正常動作</strong>。データ量も brics 1.7M /
+        rc_cms 6.6M 行と違うので step/epoch も違う</td></tr>
+    <tr><td>SAFE の既存結果が test の 1.2%（1,000/82,441行）</td>
+      <td><code>--n_generate</code> の既定は <code>None</code>＝全件
+        （<code>generation_safe_func.py:101</code>）。既存ファイルは 8/01 の手動部分実行で、
+        <code>gen_safe.sh</code> を回せば全件出る。バグではない</td></tr>
+    <tr><td>SAFE の出力先が <code>beam/normal/</code> に移動し既存ファイルを評価できない</td>
+      <td>未コミットの変更。再生成すれば新パスに出るので自然に解消する</td></tr>
+    <tr><td>batch_size で SAFE の結果が変わる</td>
+      <td><strong>乱数ではなく左パディングの浮動小数点誤差</strong>でビームのタイブレークが変わる。
+        SAFE に sampling は無いので FragGPT の対処（sampling で batch_size=1）は適用できない。
+        本番設定（num_beams=50）では 60行中1行の raw SAFE が変わるだけでデコード後は 0/60、実害なし</td></tr>
+    <tr><td>PromptSMILES の <code>--n_samples</code> 依存</td>
+      <td>1行ずつ回すと <strong>25.1倍</strong>（16時間 → 400時間）。割に合わない</td></tr>
+    <tr><td>旧 checkpoint が <code>save_total_limit</code> を占有</td>
+      <td>transformers の仕様。再学習前に <code>output_dir</code> を空にする運用の話</td></tr>
+    <tr><td><code>--resume_from_checkpoint auto</code> が旧 checkpoint を掴む</td>
+      <td><code>auto</code> の仕様どおり。help に明記済み</td></tr>
+    <tr><td>SAFE の <code>--random_seed</code> が未使用</td>
+      <td>beam は乱数を使わないので出力に影響しない</td></tr>
+    <tr><td>SAFE の候補失敗理由が未記録（実測で72.2%が非連結分子）</td>
+      <td>あると有用だが不具合ではない</td></tr>
+    <tr><td><code>safe-train</code> が site-packages の手パッチに依存</td>
+      <td><code>README.md:77-112</code> に記載済み</td></tr>
+    <tr><td>PromptSMILES の beam で uniqueness 1/50（brics の42.6%）</td>
+      <td>beam の性質。sampling を使うかは研究上の判断</td></tr>
+    <tr><td>PromptSMILES の prompt 断片が平均1.07個</td>
+      <td>手法の性質。比較の解釈の問題</td></tr>
+    <tr><td><code>joblib</code> 欠落で生成が起動しない</td>
+      <td><strong>ユーザーが別途対応する</strong></td></tr>
+    <tr><td><code>promptsmiles</code> ライブラリの <code>FragmentLinker</code> バグ疑い</td>
+      <td>外部・未検証</td></tr>
+  </table>
+
+  <h3>決着した事実: datasets のキャッシュはコード変更を検知しない</h3>
+  <p>2つのエージェントで結論が食い違ったため、実ファイルを編集して別プロセスで再実行する形で検証した。</p>
+  <pre><code>版1（s.upper()）    : fingerprint dd7b0ded3eb30c0a  先頭 "ROW00"
+関数を s.lower() に書き換えて別プロセスで実行
+版2（s.lower()）    : fingerprint dd7b0ded3eb30c0a  先頭 "ROW00"   ← 本来 "row00"</code></pre>
+  <p><code>.map()</code> の fingerprint は「元データセットの fingerprint」「関数の識別子」
+  「<code>fn_kwargs</code> の値」から作られるが、<strong>関数は dill が「モジュール名 + 関数名」だけを
+  ピクルする</strong>（実測60バイト）ため本体の変更が反映されない。
+  <code>address_review_findings.md</code> の Step 5 で入れた <code>CODE_VERSION</code>
+  （関数ソースの sha1 を <code>fn_kwargs</code> に渡す）で塞がっている。
+  <strong>この件の追加対応は不要。</strong></p>
+</section>
+
+<section id="plan">
+  <h2>実装計画</h2>
+  <ol>
+    <article class="step" data-step="1">
+      <li>
+        <h3>Step 1: 可視化に渡す前に NaN を空文字にする（回帰修正）</h3>
+        <p><strong>対象ファイル:</strong> <code>src/func/evaluation_func.py</code></p>
+        <ul>
+          <li><code>sc3_check_genmol_results</code> の
+            <code>genmols = genmols.where(genmols.notnull(), '')</code> を、
+            <strong>可視化ブロック（<code>if not skipCreateExcel:</code>）より前</strong>に移動する。</li>
+          <li>現在は可視化が先に走るため、NaN セルがそのまま <code>WriteDataFrameSmilesToXls</code> に
+            渡り、<code>visualization.py:158-162</code> が <code>isinstance(item, str)</code> でない値を
+            Mol とみなして落ちる。
+            <pre><code>AttributeError: 'float' object has no attribute 'NeedsUpdatePropertyCache'</code></pre></li>
+          <li><strong>RFFMG だけがこれを踏む。</strong> RFFMG の <code>predictions.csv</code> は
+            外部コマンド（<code>t5chem predict</code> 等）が書くため埋め文字を指定できず、
+            失敗が空セル＝NaN になる（実測: 先頭2万行で 5,665セル / 1,409行）。
+            他3手法は <code>INVALID_SMILES</code> を書くので NaN にならない。</li>
+          <li><strong>指標の値は変わらない。</strong> <code>where</code> は元々
+            <code>all_smiles</code> を作る前に適用されており、移動しても計算順序は変わらない。
+            可視化 Excel の該当セルが空の画像になるだけ。</li>
+          <li><code>dropna(axis=0)</code> を戻してはいけない（同計画 Step 18 で削除した理由が有効なため）。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="2">
+      <li>
+        <h3>Step 2: SAFE の生成ループから try/except を外す</h3>
+        <p><strong>対象ファイル:</strong> <code>src/func/generation_safe_func.py</code></p>
+        <ul>
+          <li>生成ループ（140-167行目付近）の <code>try:</code> /
+            <code>except Exception as error:</code> を外し、本体をそのままループ直下に置く。
+            例外はそのまま送出させる。</li>
+          <li><strong>理由</strong>: 現在はあらゆる例外を飲んでそのバッチを <code>'error'</code> で
+            埋めるため、<code>num_return_sequences &gt; num_beams</code> のような設定ミスや
+            CUDA OOM でも<strong>全行 <code>error</code> の predictions.csv を書いて exit 0 で終了</strong>する。
+            実測で再現済み。ユーザーの方針は「テストデータが欠けるより、やり直しになる方がよい」。</li>
+          <li>併せて以下を削除する。
+            <ul>
+              <li><code>error_logs = []</code> の初期化（136行目付近）</li>
+              <li><code>except</code> 節の <code>prompts.extend(["error"] * ...)</code> /
+                <code>generated_safe.extend(...)</code> / <code>error_logs.extend(...)</code></li>
+              <li><code>error_logs.csv</code> の書き出し（182-184行目付近）</li>
+            </ul>
+          </li>
+          <li><strong><code>error_logs.csv</code> は既存ファイルがヘッダ1行のみ</strong>＝これまで
+            一度もバッチ失敗が起きていない。使われていない救済措置のために設定ミスを
+            隠している状態だった。</li>
+          <li>モジュール冒頭の docstring（17行目・19行目付近）の <code>error_logs.csv</code> と
+            「バッチ単位で例外を捕捉し、失敗した行も <code>error</code> を埋めて表に残す」という
+            記述を、実際の挙動に合わせて書き換える。</li>
+          <li><strong>この変更で SAFE の埋め文字 <code>'error'</code> が消える</strong>ため、
+            埋め文字の統一漏れも同時に解消する。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="3">
+      <li>
+        <h3>Step 3: PromptSMILES の generation_params.txt を predictions.csv と連続保存する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_mols/gen_promptsmiles.py</code></p>
+        <ul>
+          <li><code>LogFile</code> は <code>open(fname, "w")</code> なので、<code>main()</code> の
+            冒頭（292行目付近）で開いた時点で <code>generation_params.txt</code> が切り詰められる。
+            途中でクラッシュすると <strong>params だけ新しく、<code>predictions.csv</code> は
+            前回の古いものが残る</strong>（エージェントが実際に再現済み）。</li>
+          <li><strong><code>src/func/generation_fraggpt_func.py</code> と同じ形に揃える。</strong>
+            ログ行を実行中はリストに溜めて標準出力にだけ出し、
+            <code>predictions_df.to_csv(...)</code> の<strong>直後</strong>に <code>LogFile</code> を
+            開いてまとめて書き出す。FragGPT 側の <code>log_line()</code> の実装をそのまま
+            参考にすること。</li>
+          <li>生成ループ内の <code>logfp.write(...)</code>（生成失敗の記録、340行目付近）も
+            同じリストに積むこと。</li>
+          <li><strong>起動時に古い <code>predictions.csv</code> を削除してはいけない</strong>
+            （誤起動で前回の結果が消えるため）。両方が同じタイミングで更新されることだけを保証する。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="4">
+      <li>
+        <h3>Step 4: PromptSMILES の生成を行独立にする</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_mols/gen_promptsmiles.py</code></p>
+        <ul>
+          <li>生成ループ内、<code>prompter.sample()</code> を呼ぶ直前（336-340行目付近）に
+            <code>torch.manual_seed(args.random_seed + idx)</code> を追加する。</li>
+          <li>現在 <code>prompter_seed</code> は <code>promptsmiles</code> 側の
+            <code>random.seed()</code> にしか渡らず、<strong>torch の RNG は行をまたいで
+            持ち越される</strong>。そのため前の分子の生成結果が後の行に影響し、行を1つ落として
+            再実行すると以降が全部変わる（エージェントが実測）。1行入れるだけで、中断再開・
+            部分再生成・行のスキップに耐えるようになる。コストはゼロ。</li>
+          <li><strong><code>--n_samples</code> を変えると結果が変わる点は解消しない</strong>
+            （<code>promptsmiles</code> 側が <code>n_samples</code> をバッチ幅として使うため。
+            1行ずつ回すと25.1倍かかるので対応しない）。この制約をコメントに残すこと。</li>
+          <li><code>import torch</code> が無ければ追加する（サードパーティの import 順に従う）。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="5">
+      <li>
+        <h3>Step 5: 存在しない conda 環境名を直す</h3>
+        <p><strong>対象ファイル:</strong> <code>src/train_model/run_promptsmiles.sh</code>,
+          <code>src/gen_mols/gen_fraggpt.sh</code>, <code>README.md</code>, <code>README_ja.md</code></p>
+        <ul>
+          <li><code>run_promptsmiles.sh:9</code> の <code>conda activate env_promptsmiles</code> を
+            <code>conda activate promptsmiles</code> にする。<strong>実在する環境名は
+            <code>promptsmiles</code></strong>（<code>conda env list</code> で確認済み）。
+            現在は activate が失敗し、<code>set -e</code> も <code>|| exit</code> も無いため
+            直前の env の python で学習が走る。</li>
+          <li><code>README.md</code> の 195, 231 行目の <code>env_promptsmiles</code> を
+            <code>promptsmiles</code> にする。</li>
+          <li><code>README.md</code> の 203, 238 行目の <code>env_fraggpt</code> を
+            <code>fraggpt</code> にする。</li>
+          <li><code>README_ja.md</code> の 33, 34, 41, 42, 53, 54, 193, 200, 227, 234 行目の
+            <code>env_promptsmiles</code> / <code>env_fraggpt</code> を
+            <code>promptsmiles</code> / <code>fraggpt</code> にする。</li>
+          <li><code>src/gen_mols/gen_fraggpt.sh:11</code> の
+            <code>conda activate env_fraggpt</code> も <code>conda activate fraggpt</code> にする
+            （同じ誤り）。</li>
+          <li><strong><code>run_fraggpt.sh</code> に <code>conda activate</code> を追加しては
+            いけない</strong>（ユーザーが手動で activate する方針。同日の別計画で決定済み）。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="6">
+      <li>
+        <h3>Step 6: 検証（メインエージェントが実施）</h3>
+        <p><strong>対象ファイル:</strong> 実行のみ（コード変更なし）</p>
+        <ul>
+          <li>全変更ファイルの構文チェックと import 確認</li>
+          <li><strong>Step 1</strong>: NaN セルを含む DataFrame で
+            <code>sc3_check_genmol_results</code> が <code>skipCreateExcel=False</code> でも
+            落ちないこと。RFFMG の実 <code>predictions.csv</code>（NaN を含む）で確認。
+            <strong>指標（<code>nvalid</code> / <code>nunique</code> / <code>nnovel</code> /
+            <code>rank</code> / <code>validratio</code>）が変更前と一致すること</strong></li>
+          <li><strong>Step 2</strong>: <code>num_return_sequences &gt; num_beams</code> の設定ミスが、
+            全行 <code>error</code> の CSV を書かずに<strong>例外で落ちる</strong>こと。
+            <code>error_logs.csv</code> が作られないこと</li>
+          <li><strong>Step 3</strong>: 途中で例外を起こしたとき <code>generation_params.txt</code> が
+            更新されないこと</li>
+          <li><strong>Step 4</strong>: 行を1つ落として再実行しても残りの行の結果が変わらないこと
+            （実モデル・少数行）</li>
+          <li><strong>Step 5</strong>: <code>conda activate promptsmiles</code> /
+            <code>fraggpt</code> が実際に成功すること。
+            <code>grep -rn "env_promptsmiles\|env_fraggpt"</code> が0件になること</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 5 の後</p>
+      </li>
+    </article>
+  </ol>
+</section>
+</body>
+</html>

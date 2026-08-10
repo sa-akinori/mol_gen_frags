@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Plan: レビューで見つかった20件を修正する (2026-08-08)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; }
+  h1 { border-bottom: 2px solid #333; }
+  h2 { border-bottom: 1px solid #ccc; margin-top: 2em; }
+  .step { margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+  pre { background: #f4f4f4; padding: 0.8em; border-radius: 4px; overflow-x: auto; }
+  table { border-collapse: collapse; margin: 1em 0; width: 100%; }
+  th, td { border: 1px solid #ddd; padding: 0.4em 0.7em; text-align: left; font-size: 0.95em; }
+  th { background: #f4f4f4; }
+  .warn { background: #fff3f3; border-left: 4px solid #d9534f; padding: 0.8em 1em; margin: 1em 0; }
+  .note { background: #eef6ff; border-left: 4px solid #4a90d9; padding: 0.8em 1em; margin: 1em 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plan: レビューで見つかった20件を修正する</h1>
+  <p class="meta">Date: 2026-08-08 | Status: approved</p>
+</header>
+
+<section id="overview">
+  <h2>概要</h2>
+  <p>3つの検証エージェントが FragGPT の学習・生成・評価パイプラインを実行して確認し、34件の指摘を出した。
+  ユーザーと1件ずつ突き合わせた結果、<strong>19件を修正</strong>、15件は対応不要と決定した
+  （Step 6 は一度採用したのち取り下げた。理由は Step 6 の項に記載）。</p>
+
+  <p>対応不要と決めたもの: 失敗理由の優先順位がラベル名で変わる件、<code>MOLZIP_PARAMS</code> の関数ローカル化、
+  train/validation の seed 空間共有、GPU beam の CUDA エラー（<code>gen_fraggpt.py:11</code> の
+  <code>CUDA_LAUNCH_BLOCKING=1</code> で回避済み）、<code>report_to=["wandb"]</code>（実際に使用中）、
+  uniqueness/novelty の分母（分子生成の慣例どおり）、<code>rows=0</code> での <code>range()</code> エラー、
+  <code>evaluation.py</code> が <code>xlsxwriter</code> を要求する件、<code>sanitize_failure</code> の削除
+  （RDKit の想定外例外の受け皿として残す）、生成ループのバッチ単位 try/except
+  （<strong>全テスト行で生成が完走している必要があるため、落ちたら落ちたと分かる方がよい</strong>という判断）。</p>
+
+  <h2>前提となる実測（すべてこのセッションで確認済み）</h2>
+
+  <h3>datasets のキャッシュは関数を名前でしかハッシュしない</h3>
+  <p><code>encode_fusmiles</code> の pickle ペイロードは60バイトで、中身はモジュール名と関数名だけ。</p>
+  <pre><code>11: SHORT_BINUNICODE 'train_model.train_fraggpt'
+39: SHORT_BINUNICODE 'encode_fusmiles'
+本体を差し替えた後の hash: 6a6e5cdefe0d2dfa（元と同一）</code></pre>
+  <p><code>--seed</code> や <code>--max_length</code> の変更は正しくキャッシュを無効化するので気づきにくい。</p>
+
+  <h3><code>seed + idx</code> はシード間で1行ずれの同一系列になる</h3>
+  <pre><code>現行 seed+idx     : seed42/43 の1行ずれ一致 1999/1999
+f'{seed}-{idx}'   : 0/1999
+sha1(f'{seed}-{idx}') % (2**31-1) : 0/1999</code></pre>
+  <p>実データ（brics 20,000行）で、修正すると <strong>92.9%の行で拡張結果が変わる</strong>。
+  変わるのは付番と並び順だけで、分子・断片の切り方・断片集合は同一。分布も変わらない。</p>
+  <p>学習時に行ごとの乱数を使うのは <strong>FragGPT と PromptSMILES の2手法だけ</strong>
+  （RFFMG は拡張をデータ生成時に済ませてテキストに固定、SAFE は外部 CLI <code>safe-train</code> に委譲）。</p>
+
+  <h3><code>random.Random</code> はタプルを受け取らない</h3>
+  <p>Python 3.12 で <code>TypeError: The only supported seed types are: None, int, float, str, bytes, and bytearray</code>。
+  文字列シードは <code>PYTHONHASHSEED</code> を変えても同一結果を返すことを実測済み（プロセス間で安定）。</p>
+
+  <h3>RDKit の <code>randomSeed</code> は 2**32-1 まで、2**63-1 で OverflowError</h3>
+  <p>PromptSMILES は RDKit に整数を渡すため、文字列シードは使えない。
+  <code>int(sha1(f"{seed}-{idx}").hexdigest()[:8], 16) % (2**31 - 1)</code> で31bitに収める。</p>
+
+  <h3>失敗時の埋め文字が手法ごとにバラバラ</h3>
+  <table>
+    <tr><th>手法</th><th>埋め文字</th><th>実データ</th></tr>
+    <tr><td>SAFE</td><td><code>'safe_invalid'</code></td><td>7,632個</td></tr>
+    <tr><td>FragGPT</td><td><code>''</code></td><td>—</td></tr>
+    <tr><td>PromptSMILES</td><td><code>''</code></td><td>—</td></tr>
+    <tr><td>RFFMG</td><td>埋めない（外部スクリプトが書く）</td><td>欠損0</td></tr>
+  </table>
+
+  <h3><code>all_smiles</code> の作り方が候補の位置を失わせている</h3>
+  <p><code>evaluation_func.py:494</code> の <code>(' '.join(x)).strip().split()</code> は空文字を消すため、
+  <code>prediction_k</code> の k と位置が対応しなくなる。rank を「失敗を詰めない位置」で取るには、
+  ここを <code>list(x)</code> に変える必要がある。</p>
+
+  <h3><code>Chem.MolFromSmiles('')</code> は None ではなく原子0個の Mol を返す</h3>
+  <pre><code>MolFromSmiles('') is None?  -> False
+Smi2CanSmi('')              -> ''</code></pre>
+  <div class="warn">
+    <p><code>evaluation_func.py:416</code> の <code>if Smi2Mol(s) is not None</code> は空文字を通す。
+    現在実害が無いのは上記の join/split が先に消しているからで、意図した防御ではない。</p>
+  </div>
+
+  <h3><code>novel_smi</code> は chunk TSV 経由で文字列化する</h3>
+  <p><code>evaluation_func.py:513</code> で TSV に書き <code>:518</code> で読み直すため、集合が
+  <code>"{'CCC', 'CCO'}"</code> という文字列になる。<code>evaluation.py:84</code> はそれを
+  <code>for</code> で回すので1文字ずつ取り出す。</p>
+  <pre><code>gensmiles = [' ', "'", ',', 'C', 'O', '{', '}']</code></pre>
+
+  <h2>スコープ外</h2>
+  <ul>
+    <li>生成ループのバッチ単位 try/except（ユーザー判断で不採用）</li>
+    <li><code>sanitize_failure</code> の削除（受け皿として残す）</li>
+    <li><code>--eval_strategy</code>/<code>--save_strategy</code> の食い違いがトークナイズ後に落ちる件
+      （<code>choices</code> によるタイプミス防止のみ行う。食い違い自体はユーザー判断で許容）</li>
+    <li>既存 <code>predictions.csv</code> の再生成</li>
+  </ul>
+</section>
+
+<section id="plan">
+  <h2>実装計画</h2>
+  <ol>
+    <article class="step" data-step="1">
+      <li>
+        <h3>Step 1: ダミーのみの断片を失敗として扱う</h3>
+        <p><strong>対象ファイル:</strong> <code>src/func/fragment_for_fraggpt.py</code></p>
+        <ul>
+          <li><code>assemble_fragments_with_reason</code> に、<strong>重原子を1つも持たない断片</strong>
+            （<code>[1*][2*]</code> など）があれば <code>dummy_only_fragment</code> を返す検査を追加する。
+            断片を個別にパースした直後、<code>CombineMols</code> の前に置くこと。</li>
+          <li>molzip はこうした断片を橋渡しとして繋いでしまう
+            （<code>[1*][2*].[1*]CC.[2*]OC</code> → <code>CCOC</code>）。生成としては失敗なので弾く。</li>
+          <li>docstring の <code>Returns</code> の失敗理由一覧に <code>dummy_only_fragment</code>
+            （重原子を持たない断片が含まれる）を追加する。既存の理由の説明文と同じ体裁に揃えること。</li>
+          <li><code>format_failure_summary</code> は理由文字列を汎用に列挙するため変更不要。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="2">
+      <li>
+        <h3>Step 2: 存在しない <code>ASSEMBLY_OK</code> への参照を消す</h3>
+        <p><code>ASSEMBLY_OK</code> 定数は存在しない（grep で0件）。2箇所で扱いを変える。</p>
+        <p><strong>対象ファイル:</strong> <code>src/func/generation_fraggpt_func.py</code></p>
+        <ul>
+          <li>24行目の <code>assembly_reasons</code> の説明から
+            <code>(:data:`ASSEMBLY_OK` for the assembled ones)</code> の
+            <strong>一文を丸ごと削除</strong>する。「理由ごとの件数」という説明で足りており、
+            括弧の中は何も足していない。</li>
+        </ul>
+        <p><strong>対象ファイル:</strong> <code>src/func/fragment_for_fraggpt.py</code></p>
+        <ul>
+          <li>38行目の <code>``reason`` is :data:`ASSEMBLY_OK`</code> を
+            <code>``reason`` is ``"ok"``</code> に置き換える。<strong>こちらは残す</strong>。
+            失敗理由は6種類すべて列挙されているのに成功時の値だけ欠けることになり、
+            <code>"ok"</code> は呼び出し側が実際に使う文字列
+            （<code>generation_fraggpt_func.py:34</code> の <code>assembly_reasons['ok']</code>）で
+            API の一部だから。</li>
+          <li>同時に冗長な言い回しを詰める。
+            <pre><code>Pair ``(smiles, reason)``. On success ``smiles`` is the canonical SMILES and
+``reason`` is ``"ok"``. On failure ``smiles`` is None and ``reason`` is one of:</code></pre></li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="3">
+      <li>
+        <h3>Step 3: <code>--eval_strategy</code> / <code>--save_strategy</code> に <code>choices</code> を付ける</h3>
+        <p><strong>対象ファイル:</strong> <code>src/train_model/train_fraggpt.py</code>,
+          <code>src/train_model/train_promptsmiles.py</code></p>
+        <ul>
+          <li>両引数に <code>choices=["steps", "epoch"]</code> を追加する。他の引数と同じ体裁に揃えること。</li>
+          <li><strong><code>TrainingArguments</code> の位置は変更しない</strong>
+            （食い違いがトークナイズ後に落ちる点はユーザー判断で許容）。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="4">
+      <li>
+        <h3>Step 4: <code>--resume_from_checkpoint</code> を追加する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/train_model/train_fraggpt.py</code>,
+          <code>src/train_model/train_promptsmiles.py</code></p>
+        <ul>
+          <li><code>--resume_from_checkpoint</code> を追加する（<code>type=str, default=None</code>）。
+            help には「チェックポイントのディレクトリ、または <code>auto</code> で
+            <code>output_dir</code> 内の最新」と書く。</li>
+          <li><code>trainer.train()</code> に渡す。<code>auto</code> のときは <code>True</code> を渡す
+            （transformers が最新を探す）。未指定（None）のときは現在と同じ挙動になること。</li>
+          <li><strong><code>save_total_limit</code> の削除順序についての注意をコメントで残すこと</strong>:
+            transformers はステップ番号の昇順に並べて先頭から削除するため、既存の高番号
+            チェックポイントが残ったディレクトリで新規学習すると新しい低番号側が先に消える。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="5">
+      <li>
+        <h3>Step 5: キャッシュがコード変更で無効化されるようにする</h3>
+        <p><strong>対象ファイル:</strong> <code>src/train_model/train_fraggpt.py</code>,
+          <code>src/train_model/train_promptsmiles.py</code></p>
+        <ul>
+          <li><code>encode_fusmiles</code> / <code>encode_smiles</code> に引数
+            <code>code_version: str</code> を追加する。<strong>本体では使わない</strong>。
+            docstring に「datasets は関数を名前だけでハッシュするため、拡張のコードを変えても
+            キャッシュが無効化されない。この引数を <code>fn_kwargs</code> に入れることで
+            コード変更が fingerprint に反映される」旨を明記すること
+            （非自明な制約なのでコメントに値する）。</li>
+          <li>モジュールレベルで、拡張に関わる関数のソースから版を作る。
+            <pre><code>CODE_VERSION = hashlib.sha1(
+    (inspect.getsource(encode_fusmiles) + inspect.getsource(augment_fusmiles)).encode()
+).hexdigest()[:12]</code></pre>
+            <code>train_promptsmiles.py</code> では <code>encode_smiles</code> のソースを使う
+            （<code>RandomizeSMILES</code> は同モジュール内の lambda なので、その定義行を含むよう
+            工夫するか、少なくとも <code>encode_smiles</code> を対象にすること）。</li>
+          <li><code>build_lm_dataset</code> の <code>.map(fn_kwargs=...)</code> に
+            <code>"code_version": CODE_VERSION</code> を追加する。</li>
+          <li><code>import hashlib</code>, <code>import inspect</code> を標準ライブラリの
+            import 順に従って追加する。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="6">
+      <li>
+        <h3>Step 6: 【取り下げ】行ごとの乱数をシード間で独立にする</h3>
+        <div class="note">
+          <p><strong>実装しない。</strong> <code>random.Random(seed + idx)</code> /
+          <code>RandomizeSMILES(smiles, seed + idx + 1)</code> は現状のまま残す。</p>
+          <p>取り下げの理由:</p>
+          <ul>
+            <li>brics の学習は完了済み、rc_cms も別マシンで進行中で、いま変えると再開時に
+              拡張が約93%の行で変わる</li>
+            <li>影響が出るのは「複数シードで学習して分散を測る」用途だけで、その予定がない</li>
+            <li>変わるのは付番と並び順だけで、分布は歪んでいない（拡張として不正ではない）</li>
+          </ul>
+          <p>将来この問題に対処するときの記録として、実測した修正案だけ残す。</p>
+          <pre><code># FragGPT: random.Random(f"{seed}-{idx}")   -> シード間の1行ずれ一致が 1999/1999 -> 0/1999
+# PromptSMILES: int(sha1(f"{seed}-{idx}").hexdigest()[:8], 16) % (2**31 - 1)
+#   （RDKit の randomSeed は整数のみ。2**63-1 で OverflowError になるため31bitに収める）</code></pre>
+        </div>
+      </li>
+    </article>
+
+    <article class="step" data-step="7">
+      <li>
+        <h3>Step 7: 効かない <code>PYTHONHASHSEED</code> の設定を消す</h3>
+        <p><strong>対象ファイル:</strong> <code>src/func/utility.py</code></p>
+        <ul>
+          <li><code>set_seed</code> 内の <code>os.environ['PYTHONHASHSEED'] = str(seed)</code>（29行目）を
+            削除する。Python は起動時にしかこの変数を読まないため実行中の設定は無効で、
+            「設定したつもり」になるだけ。<strong>削除しても過去の結果は変わらない</strong>
+            （元々効いていない）。</li>
+          <li><code>os.environ['CUBLAS_WORKSPACE_CONFIG']</code> の行は<strong>残す</strong>
+            （こちらは有効）。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="8">
+      <li>
+        <h3>Step 8: <code>run_fraggpt.sh</code> にリポジトリルートへの <code>cd</code> を戻す</h3>
+        <p><strong>対象ファイル:</strong> <code>src/train_model/run_fraggpt.sh</code></p>
+        <ul>
+          <li><code>cd "$(cd "$(dirname "$0")" &amp;&amp; pwd)/../.." || exit 1</code> を、
+            <code>FRAG_NAME</code> の定義より前に追加する。他3本の <code>run_*.sh</code> と
+            同じ位置・同じコメントに揃えること。</li>
+          <li>これがないと、リポジトリルート以外から実行したとき
+            <code>python: can't open file 'src/train_model/train_fraggpt.py'</code> で落ち、
+            さらに <code>mkdir -p "${WANDB_DIR}"</code> が実行時のカレントディレクトリに
+            <code>wandb/</code> を作る。</li>
+          <li><strong><code>conda activate</code> と shebang は追加しない</strong>
+            （ユーザーが手動で activate する方針）。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="9">
+      <li>
+        <h3>Step 9: 生成の乱数を batch_size 非依存にする</h3>
+        <div class="warn">
+          <p><strong>当初「バッチ先頭で seed を張り直せば batch_size 非依存になる」と記載したが、
+          これは誤りだった。</strong> <code>torch.multinomial</code> はバッチ全体に対して1回
+          呼ばれるため、バッチに何行入っているかで乱数の消費が変わる。バッチ生成を続ける限り
+          行独立にはできない（実測: バッチ先頭で seed を張っても bs=4 と bs=8 で全行不一致）。</p>
+        </div>
+        <p>実測した解決策と代償:</p>
+        <table>
+          <tr><th>方式</th><th>48行 / n_samples=50</th><th>行独立</th></tr>
+          <tr><td>バッチ生成 (bs=8)</td><td>11.76s</td><td>×</td></tr>
+          <tr><td><strong>1行ずつ生成 + 行番号で seed</strong></td>
+            <td><strong>15.54s (1.32x)</strong></td><td><strong>○</strong></td></tr>
+        </table>
+        <p><code>n_samples=50</code> で既に実効バッチが50あるため行方向のバッチ化がほとんど
+        効いておらず、1行ずつでも 1.32 倍に収まる。「全48行の後半24行」と
+        「後半24行だけを生成した結果」が一致することを実測済み。</p>
+        <p><strong>対象ファイル:</strong> <code>src/func/generation_fraggpt_func.py</code></p>
+        <ul>
+          <li>生成ループの先頭で <code>torch.manual_seed(args.random_seed + start)</code> を
+            呼ぶ（実装済み）。</li>
+          <li><strong><code>gen_method == "sampling"</code> のときバッチ幅を 1 にする。</strong>
+            ループの刻みと <code>prompts[start:start + ...]</code> の両方に同じ値を使うこと。
+            バッチ幅が 1 なら <code>start</code> が行番号そのものになるので、上記の seed の
+            張り方がそのまま行番号 seed として機能する。
+            <pre><code># sampling は torch.multinomial がバッチ全体に対して1回呼ばれるため、同じ行でもバッチに
+# 何行入っているかで結果が変わる。1行ずつ生成して行番号で seed を張り、--batch_size にも
+# 生成順序にも依存しないようにする（実測でバッチ生成の 1.32 倍）。beam は乱数を使わないので
+# バッチのままにする。
+batch_size = 1 if args.gen_method == "sampling" else args.batch_size</code></pre></li>
+          <li><code>--batch_size</code> の help に <strong>beam のみ有効</strong>である旨を
+            書き添える（<code>sampling</code> では1行ずつ生成するため無視される）。</li>
+          <li>beam のバッチ生成の挙動は変えないこと。GPU で <code>bs=24 / bs=8 / bs=1</code> が
+            すべて一致し、別プロセス間でも一致することを実測済み。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+        <div class="note">
+          <p><strong>PromptSMILES はスコープ外。</strong> 同じ性質を持つが、バッチ処理は外部
+          ライブラリ <code>promptsmiles</code> の <code>ScaffoldDecorator</code> /
+          <code>FragmentLinker</code> が握っており、構造が異なるため別途扱う。なお既に生成済みの
+          <code>predictions.csv</code> 27件はすべて beam で、sampling の結果は1つもない。</p>
+        </div>
+      </li>
+    </article>
+
+    <article class="step" data-step="10">
+      <li>
+        <h3>Step 10: 生成側の <code>set_seed</code> を学習側と揃える</h3>
+        <p><strong>対象ファイル:</strong> <code>src/func/generation_fraggpt_func.py</code></p>
+        <ul>
+          <li><code>from transformers import AutoTokenizer, GPT2LMHeadModel, set_seed</code> から
+            <code>set_seed</code> を外し、
+            <code>from func.utility import BASEPATH, LogFile, set_seed</code> に含める。</li>
+          <li>学習は <code>func.utility.set_seed</code>（<code>torch.use_deterministic_algorithms(True)</code> と
+            <code>CUBLAS_WORKSPACE_CONFIG</code> を設定）を使っているのに、生成は transformers 版で
+            決定性設定が入っていなかった。</li>
+          <li><strong>メインエージェントが GPU で検証する</strong>。
+            <code>torch.use_deterministic_algorithms(True)</code> が beam search で例外を起こす場合は
+            報告すること。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="11">
+      <li>
+        <h3>Step 11: <code>generation_params.txt</code> と <code>predictions.csv</code> を連続して保存する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/func/generation_fraggpt_func.py</code></p>
+        <ul>
+          <li><code>LogFile</code> は <code>open(fname, "w")</code> なので、<code>main()</code> の冒頭で
+            開いた時点で <code>generation_params.txt</code> が切り詰められる。途中でクラッシュすると
+            <strong>params だけ新しく、<code>predictions.csv</code> は前回の古いものが残る</strong>。</li>
+          <li>ログ行を実行中はリストに溜めて標準出力にだけ出し、
+            <code>predictions_df.to_csv(...)</code> の<strong>直後</strong>に <code>LogFile</code> を
+            開いて書き出す形に変える。</li>
+          <li><strong>起動時に古い <code>predictions.csv</code> を削除してはいけない</strong>
+            （誤って起動したときに前回の結果が消えるため）。両方が同じタイミングで更新されることだけを
+            保証する。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="12">
+      <li>
+        <h3>Step 12: 候補総数を検算できる形にする</h3>
+        <p><strong>対象ファイル:</strong> <code>src/func/generation_fraggpt_func.py</code></p>
+        <ul>
+          <li><code>format_failure_summary(...)</code> の <code>n_candidates</code> に、
+            現在の <code>sum(assembly_reasons.values())</code>（内訳の合計そのもの）ではなく
+            <code>len(test_smiles) * args.n_samples</code> を渡す。</li>
+          <li>現状は「候補総数」と「内訳の合計」が同じ値なので必ず一致し、数え漏れを検知できない。</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 11 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="13">
+      <li>
+        <h3>Step 13: <code>gen_fraggpt.py</code> の出力先に <code>additional_path</code> を反映する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_mols/gen_fraggpt.py</code></p>
+        <ul>
+          <li>38行目の <code>output_dir</code> の <code>normal</code> ハードコードを
+            <code>{args.additional_path}</code> に変える。子プロセスには既に
+            <code>--additional_path</code> を渡しているのに、時間記録の出力先だけ固定だった。
+            <code>gen_rffmg.py:44</code> は正しく埋め込んでいる。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="14">
+      <li>
+        <h3>Step 14: 誤った help と不要なコメントを消す</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_mols/gen_fraggpt.py</code></p>
+        <ul>
+          <li>26行目 <code>--additional_path</code> の help から <code>(default: empty string)</code> を
+            削除する（実際の default は <code>"normal"</code>）。</li>
+          <li>30行目 <code>--batch_size</code> の help から <code>(default: 24)</code> を削除する
+            （実際は <code>8</code>）。</li>
+          <li>41-42行目のコメント（<code>predictions.csv holds the columns ...</code>）を削除する。
+            実際には先頭に <code>fragment</code> 列があり記述と食い違っている。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="15">
+      <li>
+        <h3>Step 15: 失敗時の埋め文字を手法間で統一する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/func/utility.py</code>,
+          <code>src/func/generation_safe_func.py</code>,
+          <code>src/func/generation_fraggpt_func.py</code>,
+          <code>src/gen_mols/gen_promptsmiles.py</code></p>
+        <ul>
+          <li><code>func/utility.py</code> に定数 <code>INVALID_SMILES = "invalid"</code> を追加する。
+            既存の定数と同じ体裁に揃えること。</li>
+          <li>以下を <code>INVALID_SMILES</code> に置き換える。
+            <ul>
+              <li><code>generation_safe_func.py:172</code> の <code>'safe_invalid'</code></li>
+              <li><code>generation_fraggpt_func.py</code> の <code>smiles or ""</code>（組立失敗時の埋め）</li>
+              <li><code>gen_promptsmiles.py:87</code> の <code>to_prediction_row</code> の
+                右詰め <code>[""] * n_samples</code></li>
+            </ul>
+          </li>
+          <li><strong>RFFMG は埋め文字を出さない</strong>（外部スクリプトが
+            <code>predictions.csv</code> を書き、実データでも欠損0）ので変更対象外。</li>
+          <li><code>Chem.MolFromSmiles("invalid")</code> は <code>None</code> を返すので invalid として
+            数えられ、CSV 読み戻し時に NaN にならないため Step 18 の <code>dropna</code> 問題も
+            同時に解消する。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="16">
+      <li>
+        <h3>Step 16: <code>novel_smi</code> を集合として復元する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/evaluation.py</code></p>
+        <ul>
+          <li>84行目の <code>for smi in row['novel_smi']</code> が、TSV 往復で文字列化した集合を
+            1文字ずつ回している。<code>ast.literal_eval</code> で復元してから回すようにする。</li>
+          <li><strong>空集合は <code>"set()"</code> と書かれ <code>ast.literal_eval</code> が
+            <code>ValueError</code> を投げる</strong>ので、その場合は空集合として扱うこと。
+            この制約をコメントに残す。</li>
+          <li><code>import ast</code> を標準ライブラリの import 順に従って追加する。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="17">
+      <li>
+        <h3>Step 17: <code>nmaxgen</code> を prediction 列数から決める</h3>
+        <p><strong>対象ファイル:</strong> <code>src/func/evaluation_func.py</code></p>
+        <ul>
+          <li>475行目の <code>nmaxgen = 50</code> を削除し、491行目付近で <code>predcols</code> を
+            列名から拾って <code>nmaxgen = len(predcols)</code> とする。</li>
+          <li>482行目の可視化列の選択（<code>np.arange(1, nmaxgen+1)</code> から選ぶ）も、
+            この <code>nmaxgen</code> を使うように順序を入れ替える。</li>
+          <li><code>evaluation_func</code> に <code>nmaxgen</code> を渡す引数はそのまま残す
+            （492行目で prediction 列を落とした後に使うため、その時点では数えられない）。</li>
+          <li>現状は <code>--n_samples 10</code> で <code>KeyError</code>、<code>--n_samples 60</code> で
+            51番目以降が黙って無視され、<code>validratio</code> の分母も50のままになる。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="18">
+      <li>
+        <h3>Step 18: 候補の位置を保ち、rank を失敗込みで計算する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/func/evaluation_func.py</code></p>
+        <ul>
+          <li>494行目の
+            <code>genmols[catsmiCol] = genmols[predcols].apply(lambda x: (' '.join(x)).strip().split(), axis=1)</code>
+            を <code>list(x)</code> を使う形に変える。<strong>join/split は空文字を消すため候補の位置が
+            失われる</strong>。これにより <code>all_smiles</code> は常に <code>nmaxgen</code> 個の要素を持つ。</li>
+          <li>416行目の <code>valid_smis</code> の生成に<strong>空文字を除外するガードを追加</strong>する。
+            <code>Chem.MolFromSmiles('')</code> は <code>None</code> ではなく原子0個の Mol を返すため、
+            現在の <code>if Smi2Mol(s) is not None</code> は空文字を通してしまう。
+            これまで実害が無かったのは join/split が先に消していたからで、この Step でその防御が外れる。</li>
+          <li>422-423行目の rank を、<strong>位置を保ったリスト</strong>に対して計算するよう変える。
+            無効な候補は <code>None</code> などで位置を埋め、<code>calculateRank</code> が
+            「<code>prediction_k</code> の k」を返すようにすること。</li>
+          <li><code>unique_smis</code> / <code>novel_smi</code> など他の指標は
+            <strong>詰めたリスト（<code>valid_smis</code>）のまま</strong>にし、値が変わらないようにすること。</li>
+          <li><strong><code>evaluation_func</code> は全手法共通なので、SAFE / RFFMG / PromptSMILES の
+            top-k accuracy も変わる</strong>（下がる方向）。これはユーザー了承済み。</li>
+          <li>481-483行目の <code>dropna(axis=0)</code> を削除する。FragGPT の空文字が NaN になり
+            行ごと落ちるため、可視化サンプルが全成功行に偏っていた（実測 p=0.5 で 0/1000 行）。
+            Step 15 で埋め文字が入るので NaN 自体が発生しなくなるが、保険として
+            <code>dropna</code> は外しておくこと。</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 15, Step 17 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="19">
+      <li>
+        <h3>Step 19: chunk を完走時にだけ差し替える</h3>
+        <p><strong>対象ファイル:</strong> <code>src/func/evaluation_func.py</code></p>
+        <ul>
+          <li>502-518行目の chunk 処理を、<code>{outfd}/chunks.tmp/</code> に書き出し、
+            <strong>全 chunk を書き終えてから</strong> 既存の <code>{outfd}/chunks/</code> を削除して
+            <code>chunks.tmp</code> をリネームする形に変える。</li>
+          <li>現状は <code>os.makedirs(exist_ok=True)</code> のみで古い <code>chunk_*.tsv</code> を消さず、
+            <code>glob</code> で全部拾って concat するため、行数の違う run を続けて回すと
+            別 run の行が混ざる。</li>
+          <li><strong>起動直後に古い chunks を削除してはいけない</strong>（誤って起動して途中で
+            落ちたときに前回の結果が消えるため）。完走したときだけ差し替える。</li>
+          <li>読み込みは <code>chunks.tmp</code> 内のファイルから行い、リネーム後のパスと混同しないこと。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="20">
+      <li>
+        <h3>Step 20: 検証（メインエージェントが実施）</h3>
+        <p><strong>対象ファイル:</strong> 実行のみ（コード変更なし）</p>
+        <ul>
+          <li>全変更ファイルの構文チェックと import 確認</li>
+          <li><strong>Step 1</strong>: <code>[1*][2*].[1*]CC.[2*]OC</code> が
+            <code>dummy_only_fragment</code> を返すこと。正常な FU-SMILES の組み立て結果が
+            実データ1万件×2手法で<strong>変わらない</strong>こと</li>
+          <li><strong>Step 3</strong>: <code>--eval_strategy foo</code> が argparse で弾かれること</li>
+          <li><strong>Step 4</strong>: <code>--resume_from_checkpoint auto</code> で最新チェックポイントから
+            再開すること、未指定なら step 0 から始まること</li>
+          <li><strong>Step 5</strong>: <code>augment_fusmiles</code> のソースを変えると
+            <code>.map</code> のキャッシュ名が変わること</li>
+          <li><strong>Step 6</strong>: 取り下げのため検証なし。ただし
+            <code>random.Random(seed + idx)</code> が<strong>変更されていない</strong>ことを
+            確認すること</li>
+          <li><strong>Step 7</strong>: <code>set_seed</code> が例外なく動き、
+            <code>CUBLAS_WORKSPACE_CONFIG</code> が設定されること</li>
+          <li><strong>Step 8</strong>: リポジトリルート以外から <code>run_fraggpt.sh</code> を
+            実行してもパスが解決すること（<code>--help</code> までで確認し、学習は起動しないこと）</li>
+          <li><strong>Step 9</strong>: sampling が <code>--batch_size</code> を変えても同じ出力に
+            なること（実モデル・少数行）</li>
+          <li><strong>Step 10</strong>: <strong>GPU で beam / sampling が例外なく動くこと</strong>（最重要）</li>
+          <li><strong>Step 11</strong>: 途中で例外を起こしたとき <code>generation_params.txt</code> が
+            更新されないこと</li>
+          <li><strong>Step 15</strong>: 4手法の <code>predictions.csv</code> で埋め文字が統一され、
+            <code>Chem.MolFromSmiles</code> が <code>None</code> を返すこと</li>
+          <li><strong>Step 16</strong>: 空集合・非空集合の両方で <code>novel_smi</code> が
+            正しく復元されること</li>
+          <li><strong>Step 17</strong>: <code>--n_samples</code> が 10 / 50 / 60 のいずれでも
+            <code>KeyError</code> にならず、<code>validratio</code> の分母が正しいこと</li>
+          <li><strong>Step 18</strong>: 失敗を含む行で rank が <code>prediction_k</code> の k を
+            返すこと。<code>nvalid</code> / <code>nunique</code> / <code>nnovel</code> が
+            変更前と一致すること（rank 以外は不変）</li>
+          <li><strong>Step 19</strong>: 途中で落ちたとき古い <code>chunks/</code> が残ること。
+            完走したら差し替わること</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 19 の後</p>
+      </li>
+    </article>
+  </ol>
+</section>
+</body>
+</html>

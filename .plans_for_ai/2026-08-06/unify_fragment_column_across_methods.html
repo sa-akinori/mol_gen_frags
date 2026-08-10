@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Plan: unify_fragment_column_across_methods (2026-08-06)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; }
+  h1 { border-bottom: 2px solid #333; }
+  .step { margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; font-size: 0.92em; }
+  th, td { border: 1px solid #ddd; padding: 0.4em 0.6em; text-align: left; vertical-align: top; }
+  th { background: #f4f4f4; }
+  .decide { background: #ffeef0; border-left: 4px solid #d9534f; padding: 0.6em 1em; }
+  .out { background: #fff8e1; border-left: 4px solid #f0ad4e; padding: 0.6em 1em; }
+  .key { background: #eef6ff; border-left: 4px solid #5b9bd5; padding: 0.6em 1em; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plan: unify_fragment_column_across_methods</h1>
+  <p class="meta">Date: 2026-08-06 | Status: completed (2026-08-06 実装・検証済み。判断 A/B ともユーザー承認のうえ実施)</p>
+</header>
+
+<section id="overview">
+  <h2>概要</h2>
+  <p><code>evaluation.py</code> が <code>safe</code> と <code>promptsmiles</code> / <code>fraggpt</code> を
+  別分岐にしている理由は設計上の必然ではなく、T5Chem 用リーダ (<code>test.source</code> を行番号で横結合する) を
+  使い回した歴史的経緯でしかない。その結果、生成スクリプトが <code>data/</code> 配下に
+  <code>test.source</code> / <code>test.target</code> を書き出すという歪んだ構造になっている。</p>
+
+  <h3>調査で確定した事実</h3>
+
+  <h4>1. <code>.source</code> / <code>.target</code> を本当に持つのは rffmg だけ</h4>
+  <table>
+    <tr><th>ディレクトリ</th><th><code>.source</code> の有無</th><th>実態</th></tr>
+    <tr><td><code>data/rffmg/{frag}/{N}times_sampling/{add}/</code></td><td>あり</td><td><code>make_datasets.py</code> が作る正規のデータセット</td></tr>
+    <tr><td><code>data/safe/{frag}/normal/</code></td><td><strong>なし</strong></td><td>HF DatasetDict のみ</td></tr>
+    <tr><td><code>data/promptsmiles/{frag}/normal/</code></td><td><strong>なし</strong></td><td>HF DatasetDict のみ</td></tr>
+    <tr><td><code>data/fraggpt/{frag}/normal/test.source</code></td><td>あり (241 byte / <strong>4 行</strong>)</td><td>2026-08-04 のスモークランで <code>generation_fraggpt_func.py</code> が書いた副産物。本来の test split は 82,441 行</td></tr>
+  </table>
+  <p>生成スクリプトが <code>data/</code> に書き出しているため、<code>make_datasets.py</code> を回すと消える
+  (コード内のコメント自身が「rerunning the data generation deletes them」と認めている)。</p>
+
+  <h4>2. fraggpt の <code>test.source</code> は HF データセットと完全に重複</h4>
+  <p><code>generation_fraggpt_func.py:157</code> が書いているのは <code>test_dataset["pass_fragments"]</code>
+  そのままであり、情報量はゼロ。行のスキップもないので、HF データセットを読めば同じものが得られる。</p>
+
+  <h4>3. promptsmiles だけは「実際にプロンプトしたフラグメント」の記録が必要</h4>
+  <p><code>select_prompt_fragments</code> は <code>scaffold</code> ルートでは <code>pass_fragments</code> のうち
+  <strong>最大 1 フラグメントしか</strong>プロンプトしない (<code>linking</code> ルートは全フラグメントだが順序を
+  大きい順に並べ替える)。さらに生成例外時は行ごとスキップする。よって「条件付けに実際に使ったフラグメント」は
+  行ごとに違う。ただしこれは <strong>safe と同じく predictions.csv の <code>fragment</code> 列</strong>に
+  記録すべきものであり、行番号 join する別ファイルにする理由にはならない。むしろ行スキップがあるぶん join は危険。</p>
+
+  <h4>4. 失敗行の扱いが safe だけ非対称 (評価の公平性に関わる)</h4>
+  <table>
+    <tr><th>repr_name</th><th>生成失敗時のセル</th><th><code>loadGenSmiles</code> の扱い</th></tr>
+    <tr><td>safe</td><td><code>"error"</code> (<code>generation_safe_func.py:158-159</code>) / <code>time_out</code></td><td>全予測が該当する行を<strong>除外</strong></td></tr>
+    <tr><td>rffmg / promptsmiles / fraggpt</td><td><code>""</code></td><td>行を<strong>残す</strong> (invalid としてカウント)</td></tr>
+  </table>
+  <p>safe だけ失敗行が統計から消えるため、validity / uniqueness / novelty が他手法より有利に出る。
+  現存の <code>results/safe/gpt/finetuning/brics/beam/predictions.csv</code> (1000 行の部分実行) では
+  該当 0 行だが、コード上の非対称は残っている。</p>
+
+  <h3>あるべき姿</h3>
+  <p class="key"><strong>プロンプトしたフラグメントは、生成した本人が predictions.csv の <code>fragment</code> 列に書く。</strong>
+  これは safe が既に行っている方式であり、行番号 join が不要で最も堅牢。
+  rffmg だけは本当にテキストデータセット (<code>.source</code> / <code>.target</code>) なので join を残す。
+  結果として <code>evaluation.py</code> の分岐は <strong>rffmg / それ以外</strong>の 2 つになり、
+  生成スクリプトが <code>data/</code> へ書き込むことも無くなる。</p>
+</section>
+
+<section id="plan">
+  <h2>実装計画</h2>
+  <ol>
+    <article class="step" data-step="1">
+      <li>
+        <h3>Step 1: FragGPT の predictions.csv に <code>fragment</code> 列を追加</h3>
+        <p><strong>対象ファイル:</strong> <code>src/func/generation_fraggpt_func.py</code></p>
+        <p><strong>変更内容:</strong></p>
+        <ul>
+          <li><code>predictions_df</code> に <code>fragment</code> 列 (= <code>test_fragment_sets</code>、すなわち
+            HF データセットの <code>pass_fragments</code>) を挿入する。列順は <code>fragment</code> /
+            <code>target</code> / <code>prediction_1..N</code>。</li>
+          <li><code>test.source</code> / <code>test.target</code> の <code>save_file</code> 呼び出し (現 157-158 行) を
+            削除する。それに伴い <code>dataset_dir</code> の <code>os.makedirs</code> と
+            <code>func.utility.save_file</code> の import が不要なら整理する。</li>
+          <li>行番号 join を前提にしたコメント (現 152-156 行) を、<code>fragment</code> 列を自分で書く旨の説明に
+            置き換える。</li>
+          <li>行数の整合を確認する <code>assert</code> は残す。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="2">
+      <li>
+        <h3>Step 2: PromptSMILES の predictions.csv に <code>fragment</code> 列を追加</h3>
+        <p><strong>対象ファイル:</strong> <code>src/gen_mols/gen_promptsmiles.py</code></p>
+        <p><strong>変更内容:</strong></p>
+        <ul>
+          <li><code>predictions_df</code> に <code>fragment</code> 列 (= 既存の <code>sources</code>、すなわち
+            実際にプロンプトしたフラグメント) を挿入する。列順は <code>fragment</code> / <code>target</code> /
+            <code>sampler</code> / <code>prediction_1..N</code> (<code>sampler</code> は評価では捨てられるが、
+            どちらのサンプラに振られたかの記録として残す)。</li>
+          <li><code>test.source</code> / <code>test.target</code> の <code>save_file</code> 呼び出し (現 473-474 行) を
+            削除する。</li>
+          <li>モジュール docstring の「出力」記述 (現 28 行付近) と行番号 join を前提にしたコメント
+            (現 469-471 行) を更新する。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="3">
+      <li>
+        <h3>Step 3: SAFE の predictions.csv を index なしに統一</h3>
+        <p><strong>対象ファイル:</strong> <code>src/func/generation_safe_func.py</code></p>
+        <p><strong>変更内容:</strong> <code>predictions_df.to_csv(predictions_path)</code> を
+        <code>to_csv(predictions_path, index=False)</code> にする。現在 safe だけ index 付きで書いており、
+        <code>loadGenSmiles</code> が <code>index_col=0</code> で読み分けている。index は test split の
+        0..N-1 と一致しており (全行を保持するため) 情報を失わない。docstring の列の説明も更新する。</p>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="4">
+      <li>
+        <h3>Step 4: <code>evaluation.py</code> の分岐を 2 つに</h3>
+        <p><strong>対象ファイル:</strong> <code>src/evaluation.py</code></p>
+        <p><strong>変更内容:</strong></p>
+        <ul>
+          <li>データパスの分岐を <code>rffmg</code> / それ以外の 2 つにする。
+            <ul>
+              <li><code>rffmg</code>: <code>tr_file_name</code> は <code>.../train.target</code>、
+                <code>testInputfile</code> は <code>.../{additional_path}/test.source</code></li>
+              <li>それ以外: <code>tr_file_name</code> は <code>data/{repr_name}/{frag_method}/normal</code>
+                (HF データセット)、<code>testInputfile</code> は <code>None</code></li>
+            </ul>
+          </li>
+          <li><code>safe</code> のときの <code>additional_path = 'normal'</code> 強制を削除する。
+            promptsmiles / fraggpt について「固定しない」と決めた方針に揃える。</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 1, 2 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="5">
+      <li>
+        <h3>Step 5: <code>loadGenSmiles</code> の分岐を反転して 2 つに</h3>
+        <p><strong>対象ファイル:</strong> <code>src/func/evaluation_func.py</code></p>
+        <p><strong>変更内容:</strong></p>
+        <ul>
+          <li>分岐を <code>if repr_name == 'rffmg':</code> (predictions.csv + <code>test.source</code> を
+            行番号で横結合) と <code>else:</code> (predictions.csv がすでに <code>fragment</code> 列を持つので
+            そのまま読む) にする。</li>
+          <li><code>index_col=0</code> を廃止する (Step 3 で全手法が index なしになるため)。</li>
+          <li><strong>time_out / error 行のフィルタを削除する</strong> (下記「判断が必要な点 A」参照)。</li>
+          <li>docstring を新しい役割分担に合わせて書き直す。</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 3 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="6">
+      <li>
+        <h3>Step 6: 検証</h3>
+        <p><strong>対象ファイル:</strong> なし (検証のみ)</p>
+        <p><strong>変更内容:</strong></p>
+        <ul>
+          <li><code>python -m py_compile</code> で変更ファイルの構文を確認する。</li>
+          <li>既存の rffmg predictions.csv で <code>loadGenSmiles('rffmg', ...)</code> が従来どおり
+            <code>fragment</code> / <code>target</code> / <code>prediction_1..50</code> を返すことを確認する。</li>
+          <li>safe の既存 predictions.csv (index 付きの旧形式) の扱いを確認し、SAFE の再生成が必要になる点を報告する。</li>
+          <li><code>data/</code> 配下に生成スクリプトが書き込む箇所が残っていないことを grep で確認する。</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 5 の後</p>
+      </li>
+    </article>
+  </ol>
+</section>
+
+<section id="decisions">
+  <h2>判断が必要な点</h2>
+
+  <h3 class="decide">A. time_out / error 行のフィルタをどうするか (Step 5)</h3>
+  <ul>
+    <li><strong>推奨: 削除する。</strong> 生成に失敗したこと自体が手法の性能であり、safe だけ失敗行を統計から
+      除くと 4 手法の比較が公平でなくなる。他 3 手法は失敗行を invalid としてカウントしている。</li>
+    <li>現存の safe 結果では該当 0 行なので、現時点の数値は変わらない。</li>
+    <li>残す場合は、逆に他 3 手法にも「全予測が空の行を除外する」処理を入れて揃える必要がある。</li>
+  </ul>
+
+  <h3 class="decide">B. <code>data/fraggpt/{frag}/normal/test.{source,target}</code> を削除するか</h3>
+  <p>Step 1 でこれらを書き出さなくなるため、2026-08-04 のスモークラン残骸 (4 行) が孤立する。
+  削除してよいか確認したい。<code>data/</code> 配下のファイル削除なので勝手には行わない。</p>
+</section>
+
+<section id="notes">
+  <h2>実装対象外・報告のみ</h2>
+  <ul>
+    <li class="out">Step 3 により SAFE の predictions.csv の形式が変わるため、<strong>SAFE の再生成が必要</strong>。
+      現存の <code>results/safe/gpt/finetuning/brics/beam/predictions.csv</code> は 1000 行しかなく
+      (test split は 82,441 行)、いずれにせよ部分実行の結果である。</li>
+    <li>本計画では <code>evaluation.py</code> の <code>--additional_path</code> の choices はそのままにする
+      (手法ごとに有効な値が違うが、存在しなければパス解決で落ちる)。</li>
+  </ul>
+</section>
+</body>
+</html>

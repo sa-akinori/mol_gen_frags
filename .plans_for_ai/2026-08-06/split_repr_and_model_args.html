@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Plan: split_repr_and_model_args (2026-08-06)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; }
+  h1 { border-bottom: 2px solid #333; }
+  .step { margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; font-size: 0.92em; }
+  th, td { border: 1px solid #ddd; padding: 0.4em 0.6em; text-align: left; }
+  th { background: #f4f4f4; }
+  .note { background: #eef6ff; border-left: 4px solid #5b9bd5; padding: 0.6em 1em; }
+  .out { background: #fff8e1; border-left: 4px solid #f0ad4e; padding: 0.6em 1em; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plan: split_repr_and_model_args</h1>
+  <p class="meta">Date: 2026-08-06 | Status: completed (rev.2, 2026-08-06 実装・検証済み)</p>
+  <p class="out">rev.2: <code>arc_name</code> は <code>repr_name</code> から機械的に決まる冗長な中間変数だったため、
+  <code>pred_layout</code> にリネームするのではなく<strong>完全に廃止</strong>する方針に修正。</p>
+</header>
+
+<section id="overview">
+  <h2>概要</h2>
+  <p><code>src/evaluation.py:35-44</code> の分岐が、<strong>手法(表現)軸</strong>と<strong>モデル軸</strong>という
+  直交する 2 つの軸を <code>--model_name</code> という 1 つの引数に混ぜている。<code>safe_gpt</code> は
+  「safe 手法 × gpt モデル」の合成語であり、軸として成立していない。</p>
+
+  <p>正しい軸は以下の 2 つで、ディレクトリ構成もそのとおりになっている
+  (<code>results/{手法}/{モデル}/...</code>)。</p>
+
+  <table>
+    <tr><th>手法(表現)</th><th>モデル</th><th>実ディレクトリ</th></tr>
+    <tr><td>rffmg</td><td>t5chem</td><td><code>results/rffmg/t5chem/</code>, <code>models/rffmg/t5chem/</code>, <code>data/rffmg/</code></td></tr>
+    <tr><td>rffmg</td><td>gpt</td><td><code>results/rffmg/gpt/</code></td></tr>
+    <tr><td>safe</td><td>gpt</td><td><code>results/safe/gpt/</code></td></tr>
+    <tr><td>promptsmiles</td><td>gpt</td><td><code>results/promptsmiles/gpt/</code></td></tr>
+    <tr><td>fraggpt</td><td>gpt</td><td><code>results/fraggpt/gpt/</code></td></tr>
+  </table>
+
+  <p><code>gen_rffmg.py</code> の <code>--model_name {t5chem, gpt}</code> は既にモデル軸として正しく、
+  <code>evaluation.py</code> だけが食い違っている。本計画で <code>evaluation.py</code> を 2 軸に分離し、
+  内部変数 (<code>str_name</code> / <code>model_dir</code> / <code>arc_name</code>) の命名も実態に合わせる。</p>
+
+  <h3>現状の派生値と、2 軸化後の対応</h3>
+  <table>
+    <tr><th>現在の変数</th><th>意味</th><th>2 軸化後</th></tr>
+    <tr><td><code>str_name</code></td><td>手法のディレクトリ名</td><td><code>repr_name</code> (引数から直接)</td></tr>
+    <tr><td><code>model_dir</code></td><td>モデルのディレクトリ名</td><td><code>model_name</code> (引数から直接。派生不要)</td></tr>
+    <tr><td><code>arc_name</code></td><td>predictions.csv のレイアウト</td><td><strong>廃止</strong> (<code>repr_name</code> をそのまま渡す)</td></tr>
+    <tr><td><code>default_gen_method</code></td><td>既定デコード方式</td><td><code>'sampling' if repr_name == 'promptsmiles' else 'beam'</code></td></tr>
+  </table>
+  <p>手法ごとに本当に違うのは <strong>(1) predictions.csv のレイアウト (safe だけ独自)</strong>、
+  <strong>(2) 既定のデコード方式 (promptsmiles だけ sampling)</strong>、
+  <strong>(3) 学習データの置き場所</strong> の 3 点だけであり、5 分岐は不要になる。</p>
+
+  <h3><code>arc_name</code> を廃止できる根拠 (rev.2 で確認済み)</h3>
+  <p><code>arc_name</code> は <code>repr_name</code> から機械的に決まる冗長な中間変数であり、独立した情報を持っていない。</p>
+  <ul>
+    <li>使用箇所は 2 つだけ。<code>loadTrainSmiles</code> では<strong>関数内で一度も参照されておらず</strong>
+      (docstring にも「reader は与えられたパスの種類で選ぶ。arc_name は reader を選ばない」と明記されている)、
+      実質的に <code>loadGenSmiles</code> の 2 分岐のためだけに存在する。</li>
+    <li>その 2 分岐は「safe か、それ以外か」であり、<code>repr_name == 'safe'</code> と 1:1 で対応する。根拠は生成側の出力形式:</li>
+  </ul>
+  <table>
+    <tr><th>repr_name</th><th>predictions.csv の書き方</th><th>index 列</th><th><code>fragment</code> 列</th><th>失敗行</th></tr>
+    <tr><td>safe</td><td><code>to_csv(path)</code> (<code>generation_safe_func.py:178</code>)</td><td>あり</td><td>自前で持つ</td><td><code>time_out</code> / <code>error</code> 文字列</td></tr>
+    <tr><td>rffmg / promptsmiles / fraggpt</td><td><code>to_csv(path, index=False)</code></td><td>なし</td><td><code>test.source</code> から横結合</td><td>空文字</td></tr>
+  </table>
+  <ul>
+    <li><code>model_name</code> はレイアウトに一切影響しない (<code>rffmg × t5chem</code> と
+      <code>rffmg × gpt</code> は同一レイアウト)。</li>
+    <li><code>figure.py</code> / <code>analyze_predictions.py</code> は同名のローカル変数 <code>arc_name</code> を
+      持つだけで、<code>loadGenSmiles</code> / <code>loadTrainSmiles</code> を呼んでいない。
+      呼び出し元は <code>evaluation.py</code> の 2 箇所のみ。</li>
+  </ul>
+
+  <h3>引数名の提案</h3>
+  <p class="note"><code>--frag_method</code> (フラグメント化法) と <code>--gen_method</code> (デコード方式) が
+  既にあるため、手法軸には <strong><code>--repr_name</code></strong> を提案する
+  (structure.md の「表現 × モデル」に対応)。<code>--method</code> は <code>--frag_method</code> /
+  <code>--gen_method</code> と紛らわしいため避ける。別名がよければ指示してください
+  (<code>--str_name</code> / <code>--method</code> など)。</p>
+
+  <h3>既定値の変更について</h3>
+  <ul>
+    <li><code>--repr_name</code>: 既定 <code>rffmg</code></li>
+    <li><code>--model_name</code>: 既定を <strong><code>gpt</code></strong> に変更する (現在は <code>t5chem</code>)。
+      <code>t5chem</code> は rffmg でしか存在しないのに対し、<code>gpt</code> は 4 手法すべてに存在するため。
+      <code>rffmg × t5chem</code> を使うときは <code>--model_name t5chem</code> を明示する。</li>
+  </ul>
+</section>
+
+<section id="plan">
+  <h2>実装計画</h2>
+  <ol>
+    <article class="step" data-step="1">
+      <li>
+        <h3>Step 1: 引数を 2 軸に分離</h3>
+        <p><strong>対象ファイル:</strong> <code>src/evaluation.py</code></p>
+        <p><strong>変更内容:</strong></p>
+        <ul>
+          <li><code>--repr_name</code> を新設する (<code>type=str, default='rffmg',
+            choices=['rffmg', 'safe', 'promptsmiles', 'fraggpt']</code>、help に「手法(表現)。<code>data/</code>
+            <code>models/</code> <code>results/</code> の第 1 階層」と明記)。</li>
+          <li><code>--model_name</code> の <code>choices</code> を <code>['t5chem', 'gpt']</code> に絞り、
+            <code>default='gpt'</code> にする (help に「モデル。<code>results/{repr_name}/{model_name}/</code>
+            の第 2 階層」と明記)。</li>
+          <li>組み合わせの検証を入れる: <code>t5chem</code> は <code>rffmg</code> でしか学習されていないため、
+            <code>model_name == 't5chem' and repr_name != 'rffmg'</code> のとき <code>parser.error()</code> で
+            明示的に落とす。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="2">
+      <li>
+        <h3>Step 2: 派生値の導出を書き換え</h3>
+        <p><strong>対象ファイル:</strong> <code>src/evaluation.py</code></p>
+        <p><strong>変更内容:</strong></p>
+        <ul>
+          <li>現 <code>evaluation.py:31-44</code> の 5 分岐を<strong>まるごと削除</strong>する。
+            <code>str_name</code> / <code>model_dir</code> / <code>arc_name</code> /
+            <code>default_gen_method</code> の 4 変数はすべて廃止し、<code>repr_name</code> /
+            <code>model_name</code> をそのまま使う。</li>
+          <li><code>gen_method = args.gen_method or ('sampling' if repr_name == 'promptsmiles' else 'beam')</code>
+            にまとめる。</li>
+          <li><code>sampling_seg</code> の条件を <code>str_name == 'rffmg'</code> から
+            <code>repr_name == 'rffmg'</code> に変更する。</li>
+          <li>現 <code>evaluation.py:31-34</code> のコメントを、2 軸であること・手法ごとに違うのは
+            「predictions.csv のレイアウト」「既定のデコード方式」「学習データの置き場所」の 3 点だけであることを
+            説明する内容に書き直す。</li>
+          <li><code>loadTrainSmiles</code> / <code>loadGenSmiles</code> の呼び出しを
+            <code>loadTrainSmiles(tr_file_name)</code> /
+            <code>loadGenSmiles(repr_name, file_name, testInputfile)</code> に変更する (Step 4 と対応)。</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 1 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="3">
+      <li>
+        <h3>Step 3: データパス分岐を手法軸で整理</h3>
+        <p><strong>対象ファイル:</strong> <code>src/evaluation.py</code></p>
+        <p><strong>変更内容:</strong></p>
+        <ul>
+          <li>現 <code>evaluation.py:55-76</code> の分岐を <code>repr_name</code> ベースに書き換える。
+            <code>promptsmiles</code> と <code>fraggpt</code> はディレクトリ名以外が完全に同一なので 1 分岐に統合し、
+            <code>data/{repr_name}/{frag_method}/...</code> で組み立てる。</li>
+          <li><code>outfd</code> を
+            <code>results/{repr_name}/{model_name}/{model_ver}/{frag_method}/{sampling_seg}{gen_method}/{additional_path}</code>
+            にする。</li>
+          <li><code>frag_order</code> ブロック (現 <code>evaluation.py:108-113</code>) の <code>outfd</code> も
+            同様に書き換える (<code>datafd</code> は既に <code>data/rffmg/...</code> 固定なので変更不要)。</li>
+          <li><code>--sampling_num</code> の help を「<code>--model_name</code> が t5chem か gpt のとき」から
+            「<code>--repr_name</code> が rffmg のとき」に修正する。</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 2 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="4">
+      <li>
+        <h3>Step 4: <code>evaluation_func.py</code> から <code>arc_name</code> を廃止する</h3>
+        <p><strong>対象ファイル:</strong> <code>src/func/evaluation_func.py</code></p>
+        <p><strong>変更内容:</strong></p>
+        <ul>
+          <li><code>loadGenSmiles</code> の第 1 引数 <code>arc_name</code> を <code>repr_name</code> に置き換え、
+            分岐条件を <code>if arc_name == 'safe_gpt'</code> / <code>elif arc_name == 't5chem'</code> から
+            <code>if repr_name == 'safe'</code> / <code>else</code> に変更する。<code>'safe_gpt'</code> /
+            <code>'t5chem'</code> というレイアウト名の語彙をなくし、手法名だけで分岐させる。
+            docstring も更新し、safe だけ生成側が index 付き・<code>fragment</code> 列入りで書き出すこと、
+            他の 3 手法は <code>test.source</code> を横結合することを明記する。</li>
+          <li><code>loadTrainSmiles</code> の <code>arc_name</code> 引数は関数内で一切使われていないため削除する
+            (docstring の表も <code>arc_name</code> の行を削り、パスの種類でリーダを選ぶ説明だけ残す)。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし (Step 1-3 と独立だが、<code>evaluation.py</code> の呼び出し側修正は
+        Step 2 と同時に必要)</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="5">
+      <li>
+        <h3>Step 5: README の実行例を 2 軸に更新</h3>
+        <p><strong>対象ファイル:</strong> <code>README.md</code>, <code>README_ja.md</code></p>
+        <p><strong>変更内容:</strong> <code>README.md:247-251</code> / <code>README_ja.md:243-247</code> の
+        実行例とコメントを新しい引数体系に更新する。
+        <code>--model_name: t5chem / gpt (RFFMG-GPT) / safe_gpt / promptsmiles / fraggpt</code> という記述を
+        <code>--repr_name</code> と <code>--model_name</code> の 2 行に分け、有効な組み合わせの表を添える。</p>
+        <p><strong>依存関係:</strong> Step 3 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="6">
+      <li>
+        <h3>Step 6: 検証</h3>
+        <p><strong>対象ファイル:</strong> なし (検証のみ)</p>
+        <p><strong>変更内容:</strong></p>
+        <ul>
+          <li><code>python -m py_compile</code> で変更ファイルの構文を確認する。</li>
+          <li>有効な 5 組み合わせについて、<code>tr_file_name</code> / <code>testInputfile</code> /
+            <code>outfd</code> が実ファイル (rffmg) または生成側スクリプトの出力先文字列
+            (safe / promptsmiles / fraggpt) と一致することを確認する。</li>
+          <li>無効な組み合わせ (<code>--repr_name safe --model_name t5chem</code>) が
+            <code>parser.error()</code> で落ちることを確認する。</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 5 の後</p>
+      </li>
+    </article>
+  </ol>
+</section>
+
+<section id="out-of-scope">
+  <h2>実装対象外 (要否を確認したい)</h2>
+  <p class="out">以下にも同じ軸の混同が残っているが、今回の指摘範囲 (<code>evaluation.py:35-44</code>) 外なので
+  本計画には含めていない。必要ならステップを追加する。</p>
+  <ul>
+    <li><strong><code>src/figure.py:171-176</code></strong>:
+      <code>arc_name = 't5chem' # ['t5chem', 'safe_gpt', 'gpt']</code> から <code>str_name</code> /
+      <code>model_dir</code> を派生している (evaluation.py と同じ混同)。加えて変数 <code>model_name</code> に
+      <code>'trained'</code> (= model_ver) が入っており命名がずれている。さらに結果パスに
+      <code>{N}times_sampling</code> が無い。</li>
+    <li><strong><code>src/analyze_predictions.py:193-203</code></strong>:
+      <code>results/{arc_name}/{model_name}/{str_name}/...</code> と<strong>階層の順序が現在の出力レイアウトと違う</strong>
+      (正しくは <code>{手法}/{モデル}/{model_ver}/...</code>)。こちらは動作しない可能性が高い。</li>
+  </ul>
+</section>
+</body>
+</html>

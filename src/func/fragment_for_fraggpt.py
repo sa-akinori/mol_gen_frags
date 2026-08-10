@@ -2,19 +2,7 @@ import random
 import re
 from collections import defaultdict
 from rdkit import Chem
-
-def split_fragments(fusmiles: str) -> list[str]:
-    """Split a FU-SMILES string into its fragments.
-
-    Args:
-        fusmiles: Dot-separated fragment SMILES.
-
-    Returns:
-        The non-empty fragments in input order. Empty pieces are dropped because model output
-        may end with a separator or hold two of them in a row.
-    """
-    return [fragment for fragment in fusmiles.split(".") if fragment]
-
+from rdkit.Chem import rdmolops
 
 def _dummy_bond(mol: Chem.Mol, dummy_idx: int) -> Chem.Bond | None:
     """Return the single bond a dummy atom is attached by.
@@ -31,44 +19,53 @@ def _dummy_bond(mol: Chem.Mol, dummy_idx: int) -> Chem.Bond | None:
     return bonds[0] if len(bonds) == 1 else None
 
 
-def assemble_fragments_with_reason(fragments: list[str]) -> tuple[str | None, str]:
+def assemble_fragments_with_reason(fragments: str) -> tuple[str | None, str]:
     """Rebuild a molecule from FU-SMILES fragments and report why it failed.
 
-    Dummy atoms sharing an isotope label are the two ends of one broken bond: the atoms they
-    are attached to are bonded again and the dummies are deleted. The **bond order of the
-    dummy is reproduced** -- of the two dummy bonds the one that is not single wins -- because
-    a double bond that was cut is written as ``[1*]=C...`` and rebuilding it as a single bond
-    would silently change the molecule.
+    Dummy atoms sharing an isotope label are the two ends of one broken bond, and
+    :func:`rdkit.Chem.rdmolops.molzip` rebuilds those bonds. molzip is used rather than
+    bonding the neighbors and deleting the dummies by hand because deleting an atom moves
+    its neighbor to the end of the neighbor list, which inverts a stereocenter. The **bond
+    order of the dummy must agree between the two ends** -- a double bond that was cut is
+    written as ``[1*]=C...``, so ends that contradict each other are rejected here; the bond
+    itself is made by molzip.
 
     Args:
         fragments: Fragment SMILES whose attachment points carry paired ``[i*]`` labels.
 
     Returns:
-        Pair ``(smiles, reason)``. On success ``smiles`` is the canonical SMILES of the
-        assembled molecule and ``reason`` is :data:`ASSEMBLY_OK`. On failure ``smiles`` is
-        None and ``reason`` is one of:
+        Pair ``(smiles, reason)``. On success ``smiles`` is the canonical SMILES and
+        ``reason`` is ``"ok"``. On failure ``smiles`` is None and ``reason`` is one of:
             - ``parse_failure``: the fragment list is empty or RDKit could not parse one of
               the fragments.
+            - ``dummy_only_fragment``: a fragment holds no heavy atom, i.e. it contributes
+              nothing but a bridge between two other fragments.
             - ``unmatched_dummy``: an attachment label is unlabeled, unpaired or used more
               than twice, i.e. a dummy atom would remain in the product.
             - ``invalid_connection``: the two ends of a bond to rebuild are the same atom or
               are bonded already.
+            - ``bond_order_mismatch``: the two ends of a bond to rebuild disagree on its bond
+              order, i.e. the fragments contradict each other.
             - ``sanitize_failure``: the assembled molecule is not a valid molecule.
             - ``multiple_components``: the fragments do not assemble into a single molecule.
     """
-    # The fragments are parsed one by one and combined afterwards: joining them into one
-    # string first would let the ring-closure digits of two fragments pair up with each other.
+    # Parsed one by one: in one string, the ring-closure digits of two fragments would pair up
+    # with each other. The empty fragment the trailing '.' of the prompt makes is not a failure.
     try:
-        mols = [mol for fragment in fragments if (mol := Chem.MolFromSmiles(fragment)) is not None]
-    except ValueError:
+        mols = [Chem.MolFromSmiles(fragment) for fragment in fragments.split('.') if fragment]
+    except ValueError:  # RDKit raises instead of returning None for a few malformed SMILES.
         return None, "parse_failure"
-    if not mols:
+    if not mols or any(mol is None for mol in mols):
         return None, "parse_failure"
+    # molzip splices a fragment without heavy atoms into a plain bond between its two partners
+    # ('[1*][2*].[1*]CC.[2*]OC' -> 'CCOC'), dropping an attachment point the model had to fill.
+    if any(mol.GetNumHeavyAtoms() == 0 for mol in mols):
+        return None, "dummy_only_fragment"
     combined = mols[0]
     for fragment_mol in mols[1:]:
         combined = Chem.CombineMols(combined, fragment_mol)
 
-    # Group the dummy atoms by their attachment label; a broken bond contributes two of them.
+    # A broken bond contributes exactly two dummy atoms carrying the same label.
     dummies_by_label: dict[int, list[int]] = defaultdict(list)
     for atom in combined.GetAtoms():
         if atom.GetAtomicNum() == 0:
@@ -76,28 +73,28 @@ def assemble_fragments_with_reason(fragments: list[str]) -> tuple[str | None, st
     if any(label == 0 or len(indices) != 2 for label, indices in dummies_by_label.items()):
         return None, "unmatched_dummy"
 
-    rwmol = Chem.RWMol(combined)
+    molzip_params = rdmolops.MolzipParams()
+    molzip_params.label = rdmolops.MolzipLabel.Isotope
+    
+    pending_bonds: set[frozenset[int]] = set()
     for first_idx, second_idx in dummies_by_label.values():
-        first_bond, second_bond = _dummy_bond(rwmol, first_idx), _dummy_bond(rwmol, second_idx)
+        first_bond, second_bond = _dummy_bond(combined, first_idx), _dummy_bond(combined, second_idx)
         if first_bond is None or second_bond is None:
             return None, "unmatched_dummy"
         first_neighbor = first_bond.GetOtherAtomIdx(first_idx)
         second_neighbor = second_bond.GetOtherAtomIdx(second_idx)
-        if first_neighbor == second_neighbor or rwmol.GetBondBetweenAtoms(first_neighbor, second_neighbor) is not None:
+        neighbors = frozenset((first_neighbor, second_neighbor))
+        if (first_neighbor == second_neighbor
+                or combined.GetBondBetweenAtoms(first_neighbor, second_neighbor) is not None
+                or neighbors in pending_bonds):
             return None, "invalid_connection"
-        bond_types = (first_bond.GetBondType(), second_bond.GetBondType())
-        # The cut bond order is carried by whichever dummy bond is not single.
-        bond_type = next((bt for bt in bond_types if bt != Chem.BondType.SINGLE), Chem.BondType.SINGLE)
-        rwmol.AddBond(first_neighbor, second_neighbor, bond_type)
+        if first_bond.GetBondType() != second_bond.GetBondType():
+            return None, "bond_order_mismatch"
+        pending_bonds.add(neighbors)
 
-    # Removing an atom shifts every higher index, so delete from the back.
-    for dummy_idx in sorted((idx for indices in dummies_by_label.values() for idx in indices), reverse=True):
-        rwmol.RemoveAtom(dummy_idx)
-
-    mol = rwmol.GetMol()
     try:
+        mol = rdmolops.molzip(combined, molzip_params)
         Chem.SanitizeMol(mol)
-        # Deleting the dummies invalidates the stereo perceived when the fragments were read.
         Chem.AssignStereochemistry(mol, cleanIt=True, force=True)
     except Exception:  # RDKit raises several unrelated exception types here.
         return None, "sanitize_failure"
@@ -126,7 +123,10 @@ def label_attachment_points(fragments: list[str], rng: random.Random) -> list[st
     Raises:
         ValueError: If RDKit cannot parse one of the fragments.
     """
-    mols  = [mol for fragment in fragments if (mol := Chem.MolFromSmiles(fragment)) is not None]
+    mols = [Chem.MolFromSmiles(fragment) for fragment in fragments]
+    unparsed = [fragment for fragment, mol in zip(fragments, mols) if mol is None]
+    if unparsed:
+        raise ValueError(f"RDKit could not parse the fragments: {unparsed}")
     dummies = [atom for mol in mols for atom in mol.GetAtoms() if atom.GetAtomicNum() == 0]
     labels = list(range(1, len(dummies) + 1))
     rng.shuffle(labels)

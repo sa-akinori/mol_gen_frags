@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Plan: PromptSMILES を含む4手法の比較を成立させる（案C） (2026-08-09)</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; line-height: 1.7; }
+  h1 { border-bottom: 2px solid #333; }
+  h2 { border-bottom: 1px solid #ccc; margin-top: 2em; }
+  .step { margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 4px; }
+  .meta { color: #666; font-size: 0.9em; }
+  code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+  pre { background: #f4f4f4; padding: 0.8em; border-radius: 4px; overflow-x: auto; }
+  table { border-collapse: collapse; margin: 1em 0; width: 100%; }
+  th, td { border: 1px solid #ddd; padding: 0.4em 0.7em; text-align: left; font-size: 0.95em; }
+  th { background: #f4f4f4; }
+  .warn { background: #fff3f3; border-left: 4px solid #d9534f; padding: 0.8em 1em; margin: 1em 0; }
+  .note { background: #eef6ff; border-left: 4px solid #4a90d9; padding: 0.8em 1em; margin: 1em 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plan: PromptSMILES を含む4手法の比較を成立させる（案C）</h1>
+  <p class="meta">Date: 2026-08-09 | Status: pending-approval</p>
+</header>
+
+<section id="overview">
+  <h2>概要</h2>
+
+  <div class="warn">
+    <p>PromptSMILES は、attachment point を2個以上持つ断片を含む集合を条件にできない。
+    <code>ScaffoldDecorator</code> は「何を置くか」を指定できず、<code>FragmentLinker</code> は
+    断片を <code>(frag)</code> の枝として文字列挿入するため<strong>結合を1本しか作れない</strong>
+    （<code>samplers.py:558-560</code> の assert はこの構造から来る制約）。
+    <code>scaffold=[...]</code> にリストを渡しても、<code>samplers.py:333-334</code> で
+    1サンプルにつき1つが乱択されるだけで、複数断片の同時条件付けにはならない。</p>
+    <p>その結果、test 全行の <strong>90.5%（brics）/ 84.3%（rc_cms）</strong> で、
+    PromptSMILES は断片集合の一部（最大断片1個）しか条件に取れない。他の3手法は集合すべてを
+    受け取るため、このままでは同じ課題を解いていない。</p>
+  </div>
+
+  <p>対応は<strong>案C（AとBの併記）</strong>を採る。</p>
+  <ul>
+    <li><strong>A（主表）</strong>: 4手法を同じ課題で採点する。<code>fragment</code> 列に元の断片集合
+      すべてを書き、PromptSMILES が条件を落とすぶん低いスコアになるのを結果として出す。</li>
+    <li><strong>B（副表）</strong>: PromptSMILES が断片集合を100%条件にできる行だけで4手法を比べる。
+      この部分集合では全手法が同一の条件を受け取るので、厳密に等価な比較になる。</li>
+  </ul>
+  <p>Bの仕組みは既存の <code>analyze_predictions.py</code> の <code>spec_cond_frags</code> /
+  <code>spec_stats.csv</code> / <code>no_spec_stats.csv</code> がそのまま使える。新規には作らない。</p>
+
+  <h2>前提の確認（調査済み）</h2>
+  <div class="note">
+    <ul>
+      <li><code>results/</code> に PromptSMILES の <code>predictions.csv</code> は<strong>まだ無い</strong>。
+        Step 1 による再生成コストはゼロ。</li>
+      <li>4手法の <code>fragment</code> 列は同一形式（<code>*C(=O)C=*.*N1CCN(*)CC1...</code>）。
+        RFFMG は <code>test.source</code> 由来、他3手法は生成側が書く。よってBの判定は
+        <code>fragment</code> 列だけで手法ごとに独立に計算でき、<strong>手法間の行 join は不要</strong>。</li>
+      <li><code>spec_cond_frags</code> の現行条件は「断片1個」または「2断片かつ各1点」。
+        PromptSMILES の実力は「断片1個」または「<strong>全断片</strong>が各1点」。</li>
+    </ul>
+  </div>
+
+  <table>
+    <tr><th></th><th>断片1個</th><th>2断片・各1点</th><th>3断片以上・各1点</th><th>表現不可</th>
+      <th>現行 spec</th><th>修正後 spec</th></tr>
+    <tr><td>brics (82,441)</td><td>2,690</td><td>4,592</td><td>528</td><td>74,631</td>
+      <td>7,282 (8.83%)</td><td>7,810 (9.47%)</td></tr>
+    <tr><td>rc_cms (90,974)</td><td>9,473</td><td>4,354</td><td>457</td><td>76,690</td>
+      <td>13,827 (15.20%)</td><td>14,284 (15.70%)</td></tr>
+  </table>
+
+  <h2>スコープ外</h2>
+  <ul>
+    <li>promptsmiles ライブラリ本体の変更（<code>FragmentLinker</code> のバグ含む）。上流のまま
+      比較する方針は <code>.plans_for_ai/2026-08-09/patch_promptsmiles_fragmentlinker.md</code> で確定済み。</li>
+    <li><code>evaluation_func.py:443</code> の <code>validfragratio_exH</code> が非 exH 版を
+      呼んでいる件（別件）。</li>
+    <li>生成の実行、図の作成。</li>
+  </ul>
+</section>
+
+<section id="plan">
+  <h2>実装計画</h2>
+  <ol>
+    <article class="step" data-step="1">
+      <li>
+        <h3>Step 1: <code>fragment</code> 列に元の断片集合すべてを書く</h3>
+        <p><strong>対象ファイル:</strong> <code>src/func/generation_promptsmiles_func.py</code></p>
+        <p><strong>変更内容:</strong></p>
+        <ul>
+          <li><code>main()</code> のループで集める値を2系統に分ける。
+            <ul>
+              <li><code>fragment</code> 列 = <strong>元の断片集合</strong> <code>fragment_set</code>
+                （プロンプトに使えなかった断片も含む）</li>
+              <li><code>prompt_fragments</code> 列 = <strong>実際にプロンプトした断片</strong>
+                <code>".".join(fragments)</code></li>
+            </ul>
+            （SAFE が <code>fragment</code> の隣に <code>prompt_safe</code> を持つのと同じ体裁）</li>
+          <li>変数 <code>prompted_fragments</code> は意味が変わるのでリネームし、
+            <code>prompt_fragments</code> を新設する。</li>
+          <li><code>predictions_df</code> の列順は <code>fragment</code>, <code>target</code>,
+            <code>sampler</code>, <code>prompt_fragments</code>, <code>prediction_1..N</code> とする。
+            <code>evaluation.py:80</code> は <code>['fragment', 'target'] + pred_cols</code> を
+            明示選択するので、列が増えても評価は壊れない。</li>
+          <li>行数一致を確かめる <code>assert</code>（現 360 行）に <code>prompt_fragments</code> を加える。</li>
+          <li>現 359 行のコメント「The evaluation reads the prompt from the fragment column」は
+            事実でなくなるので、<strong>評価は要求された断片集合を読み、実際のプロンプトは
+            <code>prompt_fragments</code> に残る</strong>という趣旨に直す。</li>
+          <li><code>select_prompt_fragments</code> の docstring のうち、返り値が評価に直結する旨に
+            触れている箇所を実態に合わせる。<strong>それ以外の説明は増やさない。</strong></li>
+          <li>デッドコードを削除する: <code>parse_fragments</code>（32-42行）は docstring だけで
+            本体が空で、暗黙に <code>None</code> を返す。どこからも呼ばれておらず、ロジックは
+            <code>select_prompt_fragments:68</code> にインライン展開済み。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="2">
+      <li>
+        <h3>Step 2: <code>spec_cond_frags</code> を PromptSMILES の表現可能条件に一致させる</h3>
+        <p><strong>対象ファイル:</strong> <code>src/analyze_predictions.py</code></p>
+        <p><strong>変更内容:</strong></p>
+        <ul>
+          <li>「3断片以上を一律 False にする」分岐を外し、条件を
+            <strong>「断片が1個」または「全断片の attachment point がちょうど1個」</strong> にする。
+            <code>FragmentLinker</code> は3断片以上でも <code>scan=True</code> を自動で有効にして
+            扱えるため、現行条件は PromptSMILES の実力より狭い。</li>
+          <li>型ヒント（<code>frags: str -&gt; bool</code>）と Google style docstring を付ける。
+            docstring には<strong>この条件が PromptSMILES の表現可能範囲と一致すること</strong>を
+            1〜2行で書く。</li>
+          <li>分岐を素直に1つの述語として書き直す（<code>all(...)</code> を使い、
+            <code>True if x else False</code> の冗長な書き方をやめる）。</li>
+          <li><code>if 1:</code> ブロックのコメント「Condition: Input is one fragment with multiple
+            attachment points or two fragments with one attachment point each」を新条件に合わせて直す。</li>
+        </ul>
+        <p><strong>依存関係:</strong> なし</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="3">
+      <li>
+        <h3>Step 3: spec / no_spec の統計計算を1つの関数にまとめる</h3>
+        <p><strong>対象ファイル:</strong> <code>src/analyze_predictions.py</code></p>
+        <p><strong>変更内容:</strong></p>
+        <ul>
+          <li><code>if 1:</code> ブロック内で <code>spec_stats</code> と <code>no_spec_stats</code> を
+            組み立てている2つの dict は、参照する DataFrame が違うだけで
+            <strong>中身が完全に同一の22行</strong>。
+            <code>summarize_generation_stats(df: pd.DataFrame) -&gt; pd.Series</code> を新設して
+            両方から呼ぶ。</li>
+          <li>関数は <code>avg/std</code> の <code>validity</code>, <code>validity_onfrags</code>,
+            <code>uniqueness</code>, <code>novelty</code>, <code>tanimoto_sim</code>,
+            <code>rediscovery</code> を返す。集計対象の絞り込み（<code>nnovel != 0</code>）も含め、
+            現行の計算内容を<strong>一切変えない</strong>。</li>
+          <li>Google style docstring に返り値のインデックス名を明記する。</li>
+          <li>呼び出し側は <code>summarize_generation_stats(spec_cond_df).to_csv(...)</code> の2行になる。</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 2 の後</p>
+      </li>
+    </article>
+
+    <article class="step" data-step="4">
+      <li>
+        <h3>Step 4: 2つの表の位置づけを README に書く</h3>
+        <p><strong>対象ファイル:</strong> <code>README.md</code>, <code>README_ja.md</code></p>
+        <p><strong>変更内容:</strong></p>
+        <ul>
+          <li>「Evaluation of Generated Molecules」節の末尾に短い項を足す。書く内容は3点だけ。
+            <strong>それ以上は書かない。</strong>
+            <ol>
+              <li><code>evaluation.py</code> が出す <code>stats.csv</code> が主表
+                （全 test 行、4手法とも同じ断片集合を要求）。</li>
+              <li><code>analyze_predictions.py</code> が出す <code>spec_stats.csv</code> が副表で、
+                PromptSMILES が断片集合を100%条件にできる行だけを集めたもの。
+                <code>no_spec_stats.csv</code> はその補集合。</li>
+              <li>PromptSMILES は attachment point を2個以上持つ断片を条件にできないため、主表では
+                断片集合の一部しか使えない行が brics 90.5% / rc_cms 84.3% を占める。
+                <code>predictions.csv</code> の <code>prompt_fragments</code> 列に実際に使われた
+                断片が残る。</li>
+            </ol>
+          </li>
+          <li>PromptSMILES の生成コマンド（<code>bash src/gen_mols/gen_promptsmiles.sh</code>）の
+            説明に、<code>sampler</code> 列が <code>scaffold</code> / <code>linking</code> の
+            どちらを通ったかを示す旨を1行足す。</li>
+        </ul>
+        <p><strong>依存関係:</strong> Step 1、Step 2 の後</p>
+      </li>
+    </article>
+  </ol>
+</section>
+
+<section id="verify">
+  <h2>検証（実装後にメインエージェントが実施）</h2>
+  <ul>
+    <li><code>python -m py_compile</code> が4ファイルとも通ること。</li>
+    <li><code>spec_cond_frags</code> を修正後の実装で test 全行に適用し、True の行数が
+      brics <strong>7,810</strong> / rc_cms <strong>14,284</strong> になること（上表と一致すること）。</li>
+    <li><code>summarize_generation_stats</code> の出力が、既存の <code>spec_stats.csv</code> /
+      <code>no_spec_stats.csv</code>（rffmg・safe の既存結果）と<strong>数値・インデックスとも
+      完全一致</strong>すること。リファクタで値が変わっていないことをこれで担保する。</li>
+    <li>PromptSMILES を <code>--additional_path</code> を分けた一時ディレクトリで少数行だけ生成し、
+      <code>predictions.csv</code> の列が <code>fragment</code>, <code>target</code>,
+      <code>sampler</code>, <code>prompt_fragments</code>, <code>prediction_*</code> の順で並び、
+      <code>fragment</code> にドット区切りの元の集合、<code>prompt_fragments</code> に実際の
+      プロンプトが入っていること。確認後、一時ディレクトリは削除する。</li>
+  </ul>
+</section>
+</body>
+</html>

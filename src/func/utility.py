@@ -19,6 +19,7 @@ import transformers
 from rdkit import Chem
 
 BASEPATH = os.path.dirname(__file__).replace('/src/func', '')
+INVALID_SMILES = 'invalid'
 
 canonical_smiles = lambda smi: Chem.MolToSmiles(Chem.MolFromSmiles(smi))
 
@@ -26,7 +27,6 @@ def set_seed(seed=42):
     """
     Seed setting for reproducibility
     """
-    os.environ['PYTHONHASHSEED'] = str(seed)
     os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
     random.seed(seed)
     np.random.seed(seed)
